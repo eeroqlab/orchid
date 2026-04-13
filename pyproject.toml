@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orchid"
+version = "0.1.0"
+description = "Orchestrating Instruments & Data — a lab experiment control system"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+dependencies = [
+    "numpy",
+    "tqdm",
+    "zarro",
+]
+
+[project.optional-dependencies]
+qcodes = ["qcodes"]
+pymeasure = ["pymeasure"]
+
+[tool.setuptools.packages.find]
+include = ["orchid*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
