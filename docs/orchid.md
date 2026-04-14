@@ -529,6 +529,60 @@ The runner:
 6. Saves metadata on completion (or on error)
 7. Returns the `Path` to the data directory
 
+#### How write modes execute internally
+
+The runner uses recursive sweep loops that change behavior depending on the `write_mode`. Here is how each mode works for a 3D scan with `sweeps = [power, Vgt, fac]`:
+
+**POINTWISE** — flat recursion, writes at every leaf:
+
+```
+for each power[i]:          # axis 0
+  for each Vgt[j]:          # axis 1
+    for each fac[k]:        # axis 2
+      set, settle, measure
+      write_point((i,j,k))  # one write per point
+```
+
+**SWEEPWISE** — recurses through outer axes, buffers the innermost:
+
+```
+for each power[i]:          # axis 0 (outer loop)
+  for each Vgt[j]:          # axis 1 (outer loop)
+    buffer = []
+    for each fac[k]:        # axis 2 (buffered)
+      set, settle, measure
+      buffer[k] = data
+    write_trace((i,j), buffer)  # one write per inner sweep
+```
+
+The runner walks axes 0 and 1 with normal recursion. When it reaches the innermost axis (2), it switches to a buffering loop that collects all `fac` points into a numpy array, then writes them in one shot via `write_trace(outer_index, buffer)`. For a 20x50x200 scan, that is 1,000 writes instead of 200,000.
+
+**PLANEWISE** — recurses through outer axes, buffers the two innermost:
+
+```
+for each power[i]:          # axis 0 (outer loop)
+  buffer = np.empty((50, 200))
+  for each Vgt[j]:          # axis 1 (buffered)
+    for each fac[k]:        # axis 2 (buffered)
+      set, settle, measure
+      buffer[j, k] = data
+  write_image((i,), buffer)  # one write per 2D plane
+```
+
+Same idea but buffers a full 2D plane (the two innermost axes). For a 20x50x200 scan, only 20 writes to disk.
+
+**ALL** — buffers everything, single write:
+
+```
+buffer = np.empty((20, 50, 200))
+for each power[i]:
+  for each Vgt[j]:
+    for each fac[k]:
+      set, settle, measure
+      buffer[i, j, k] = data
+write_all(buffer)             # one single write
+```
+
 #### Experiment ID numbering
 
 By default, data is saved in auto-numbered subdirectories:
@@ -575,10 +629,29 @@ data_2d = z["lockin_X"][:]  # shape (50, 101)
 row_5 = z["lockin_X"][5, :]  # one outer slice
 
 # Read metadata
-with open("./data/0001/metadata.yaml") as f:
-    meta = yaml.safe_load(f)
+from orchid import read_metadata
+meta = read_metadata("./data/0001")
 print(meta["sample"])     # "chip_A1"
 print(meta["status"])     # "completed"
+```
+
+#### Updating metadata after an experiment
+
+Use `update_metadata` to annotate an experiment with additional information at any time after it completes — notes, analysis results, quality flags, etc.:
+
+```python
+from orchid import update_metadata, read_metadata
+
+data_dir = runner.run(proc)
+
+# Later (even in a different script/session):
+update_metadata(data_dir, notes="clean Coulomb diamonds", quality="A")
+update_metadata(data_dir, T_mc=0.015, B_field="1T")
+
+# Keys are merged — existing keys are overwritten, new keys are added
+meta = read_metadata(data_dir)
+print(meta["notes"])      # "clean Coulomb diamonds"
+print(meta["T_mc"])       # 0.015
 ```
 
 ---
@@ -692,12 +765,12 @@ Stop manually with `Ctrl+C` — data is always saved.
 Hooks let you inject custom logic at specific points in the experiment:
 
 ```python
-def ramp_field(proc):
+def ramp_field():
     """Ramp magnet before experiment starts."""
     magnet.set_field(1.0)
     time.sleep(10)
 
-def log_point(index, proc):
+def log_point(index):
     """Print every 100th point."""
     if sum(index) % 100 == 0:
         print(f"Point {index}: Vgt={ctx['Vgt']:.3f}")
@@ -716,12 +789,12 @@ Available hooks:
 
 | Hook                | When called                  | Signature                    |
 |---------------------|------------------------------|------------------------------|
-| `before_experiment` | Once, before first point     | `(procedure) -> None`        |
-| `after_experiment`  | Once, after last point       | `(procedure) -> None`        |
-| `before_sweep`      | Before each sweep axis starts| `(axis_index, procedure) -> None` |
-| `after_sweep`       | After each sweep axis ends   | `(axis_index, procedure) -> None` |
-| `before_point`      | Before each measurement      | `(index_tuple, procedure) -> None` |
-| `after_point`       | After each measurement       | `(index_tuple, procedure) -> None` |
+| `before_experiment` | Once, before first point     | `() -> None`                 |
+| `after_experiment`  | Once, after last point       | `() -> None`                 |
+| `before_sweep`      | Before each sweep axis starts| `(axis_index) -> None`       |
+| `after_sweep`       | After each sweep axis ends   | `(axis_index) -> None`       |
+| `before_point`      | Before each measurement      | `(index_tuple) -> None`      |
+| `after_point`       | After each measurement       | `(index_tuple) -> None`      |
 
 All hooks support both sync and async callables.
 
@@ -975,12 +1048,12 @@ Experiment procedure for sweep-based measurements.
 | `max_retries`      | `int`               | `3`                  | Retries for `RETRY_AND_SKIP` policy         |
 | `tags`             | `list[str]`         | `[]`                 | Free-form tags for metadata                 |
 | `metadata`         | `dict`              | `{}`                 | Additional metadata to save                 |
-| `before_experiment`| `callable` or `None`| `None`               | Hook: once before start                     |
-| `after_experiment` | `callable` or `None`| `None`               | Hook: once after finish                     |
-| `before_point`     | `callable` or `None`| `None`               | Hook: before each measurement               |
-| `after_point`      | `callable` or `None`| `None`               | Hook: after each measurement                |
-| `before_sweep`     | `callable` or `None`| `None`               | Hook: before each sweep axis starts         |
-| `after_sweep`      | `callable` or `None`| `None`               | Hook: after each sweep axis ends            |
+| `before_experiment`| `callable` or `None`| `None`               | Hook `()`: once before start                |
+| `after_experiment` | `callable` or `None`| `None`               | Hook `()`: once after finish                |
+| `before_point`     | `callable` or `None`| `None`               | Hook `(index_tuple)`: before each measurement |
+| `after_point`      | `callable` or `None`| `None`               | Hook `(index_tuple)`: after each measurement  |
+| `before_sweep`     | `callable` or `None`| `None`               | Hook `(axis_index)`: before each sweep axis   |
+| `after_sweep`      | `callable` or `None`| `None`               | Hook `(axis_index)`: after each sweep axis    |
 
 | Property  | Type            | Description                    |
 |-----------|-----------------|--------------------------------|
@@ -1007,9 +1080,9 @@ Time-series monitoring procedure (no sweeps).
 | `stop_condition`   | `callable` or `None`| `None`               | `(data_dict) -> bool`; return `True` to stop|
 | `tags`             | `list[str]`         | `[]`                 | Free-form tags                              |
 | `metadata`         | `dict`              | `{}`                 | Additional metadata                         |
-| `before_experiment`| `callable` or `None`| `None`               | Hook: once before start                     |
-| `after_experiment` | `callable` or `None`| `None`               | Hook: once after finish                     |
-| `after_point`      | `callable` or `None`| `None`               | Hook: after each read `(index, data_dict)`  |
+| `before_experiment`| `callable` or `None`| `None`               | Hook `()`: once before start                |
+| `after_experiment` | `callable` or `None`| `None`               | Hook `()`: once after finish                |
+| `after_point`      | `callable` or `None`| `None`               | Hook `(sample_index, data_dict)`: after each read |
 
 Data is saved via zarro's `StreamingWriter` with a `_time` timestamp array.
 
@@ -1090,6 +1163,30 @@ loop:
   append(data)
   check stop_condition / duration
   sleep(interval)
+```
+
+---
+
+### Utility Functions
+
+```python
+from orchid import update_metadata, read_metadata
+```
+
+**`update_metadata(data_dir, **kwargs) -> dict`**
+
+Add or overwrite fields in an experiment's `metadata.yaml`. Returns the full updated dict.
+
+```python
+update_metadata("./data/0001", notes="good data", quality="A", T_mc=0.015)
+```
+
+**`read_metadata(data_dir) -> dict`**
+
+Read an experiment's `metadata.yaml`. Raises `FileNotFoundError` if missing.
+
+```python
+meta = read_metadata("./data/0001")
 ```
 
 ---

@@ -5,6 +5,7 @@ from .parameter import DataKind, Parameter, Readout
 from .context import ExperimentContext
 from .procedure import ErrorPolicy, MonitorProcedure, Procedure, Sweep, WriteMode
 from .runner import ExperimentRunner
+from .utils import read_metadata, update_metadata
 
 __all__ = [
     "InstrumentAdapter",
@@ -18,4 +19,6 @@ __all__ = [
     "Sweep",
     "WriteMode",
     "ExperimentRunner",
+    "read_metadata",
+    "update_metadata",
 ]

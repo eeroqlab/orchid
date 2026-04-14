@@ -28,6 +28,20 @@ from zarro import (
 from zarro.core2 import StreamingWriter
 
 
+def _run_coro(coro):
+    """Run a coroutine, handling both script and Jupyter (running loop) contexts."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No event loop running — normal script context
+        return asyncio.run(coro)
+    else:
+        # Event loop already running (Jupyter, IPython, etc.)
+        import nest_asyncio
+        nest_asyncio.apply(loop)
+        return loop.run_until_complete(coro)
+
+
 _WRITEMODE_TO_ZARR = {
     WriteMode.POINTWISE: WriteType.POINTWISE,
     WriteMode.SWEEPWISE: WriteType.TRACEWISE,
@@ -113,9 +127,12 @@ class ExperimentRunner:
     def run(self, procedure: Procedure) -> Path:
         """Run a sweep experiment synchronously.
 
+        Works both from scripts (no event loop) and from Jupyter
+        notebooks (event loop already running).
+
         Returns the path to the saved data directory.
         """
-        return asyncio.run(self.arun(procedure))
+        return _run_coro(self.arun(procedure))
 
     async def arun(self, proc: Procedure) -> Path:
         """Run a sweep experiment asynchronously."""
@@ -142,17 +159,18 @@ class ExperimentRunner:
         if tqdm is not None:
             pbar = tqdm(total=total_points, desc=proc.name, unit="pt")
 
-        await _acall_hook(proc.before_experiment, proc)
+        await _acall_hook(proc.before_experiment)
 
         try:
-            if proc.write_mode == WriteMode.ALL:
-                await self._run_all(proc, writer, pbar)
-            elif proc.write_mode == WriteMode.PLANEWISE:
-                await self._run_planewise(proc, writer, pbar)
-            elif proc.write_mode == WriteMode.SWEEPWISE:
-                await self._run_sweepwise(proc, writer, pbar)
-            else:
-                await self._run_pointwise(proc, writer, pbar)
+            match proc.write_mode:
+                case WriteMode.ALL:
+                    await self._run_all(proc, writer, pbar)
+                case WriteMode.PLANEWISE:
+                    await self._run_planewise(proc, writer, pbar)
+                case WriteMode.SWEEPWISE:
+                    await self._run_sweepwise(proc, writer, pbar)
+                case WriteMode.POINTWISE | None:
+                    await self._run_pointwise(proc, writer, pbar)
         except BaseException:
             # Always save metadata even on error
             meta = {**proc.context.metadata, **proc.metadata, "status": "error"}
@@ -164,7 +182,7 @@ class ExperimentRunner:
         meta = {**proc.context.metadata, **proc.metadata, "status": "completed"}
         writer.write_metadata(meta=meta)
 
-        await _acall_hook(proc.after_experiment, proc)
+        await _acall_hook(proc.after_experiment)
 
         if pbar:
             pbar.close()
@@ -186,14 +204,14 @@ class ExperimentRunner:
         sweep = proc.sweeps[axis]
         values = self._maybe_snake(proc, sweep, axis, index)
 
-        await _acall_hook(proc.before_sweep, axis, proc)
+        await _acall_hook(proc.before_sweep, axis)
         for i, val in enumerate(values):
             await sweep.parameter.aset(val)
             await self._pointwise_loop(proc, writer, pbar, axis + 1, index + (i,))
-        await _acall_hook(proc.after_sweep, axis, proc)
+        await _acall_hook(proc.after_sweep, axis)
 
     async def _measure_and_write_point(self, proc, writer, index, pbar):
-        await _acall_hook(proc.before_point, index, proc)
+        await _acall_hook(proc.before_point, index)
         if proc.settle_time > 0:
             await asyncio.sleep(proc.settle_time)
 
@@ -203,7 +221,7 @@ class ExperimentRunner:
 
         writer.write_point(index, data)
 
-        await _acall_hook(proc.after_point, index, proc)
+        await _acall_hook(proc.after_point, index)
         if pbar:
             pbar.update(1)
 
@@ -218,7 +236,42 @@ class ExperimentRunner:
 
     async def _sweepwise_outer(self, proc, writer, pbar, axis, index):
         """Recurse through outer axes; when we reach the innermost, hand off
-        to ``_sweepwise_inner`` which collects a full trace."""
+        to ``_sweepwise_inner`` which collects a full trace.
+        
+        Simple example for 3D (power, Vgt, fac) with SWEEPWISE on fac (innermost):
+        sweeps = [
+            Sweep("power", ...),   # axis 0 — slowest (outer)
+            Sweep("Vgt", ...),     # axis 1 — middle
+            Sweep("fac", ...),     # axis 2 — fastest (inner)
+        ]
+        _sweepwise_outer recursively walks through all axes except the last one,
+        then hands off the innermost sweep to _sweepwise_inner which collects a full trace and writes it at once.
+
+        Here's the call flow:
+        _run_sweepwise()
+        └─ _sweepwise_outer(axis=0, index=())
+            │
+            │  axis=0 is NOT the inner axis (2), so loop over power values:
+            │
+            ├─ set power[0], call _sweepwise_outer(axis=1, index=(0,))
+            │    │
+            │    │  axis=1 is NOT the inner axis (2), so loop over Vgt values:
+            │    │
+            │    ├─ set Vgt[0], call _sweepwise_outer(axis=2, index=(0,0))
+            │    │    │
+            │    │    │  axis=2 IS the inner axis → call _sweepwise_inner(outer_index=(0,0))
+            │    │    │    → sweeps all fac values, buffers data, writes one trace
+            │    │    │    → writer.write_trace((0,0), buffered_data)
+            │    │    │
+            │    ├─ set Vgt[1], call _sweepwise_outer(axis=2, index=(0,1))
+            │    │    └─ _sweepwise_inner(outer_index=(0,1)) → write_trace((0,1), ...)
+            │    │
+            │    └─ set Vgt[2], ...
+            │
+            ├─ set power[1], call _sweepwise_outer(axis=1, index=(1,))
+            │    └─ ... same pattern ...
+            └─ ...
+        """
         inner_axis = proc.ndim - 1
 
         if axis == inner_axis:
@@ -229,11 +282,11 @@ class ExperimentRunner:
         sweep = proc.sweeps[axis]
         values = self._maybe_snake(proc, sweep, axis, index)
 
-        await _acall_hook(proc.before_sweep, axis, proc)
+        await _acall_hook(proc.before_sweep, axis)
         for i, val in enumerate(values):
             await sweep.parameter.aset(val)
             await self._sweepwise_outer(proc, writer, pbar, axis + 1, index + (i,))
-        await _acall_hook(proc.after_sweep, axis, proc)
+        await _acall_hook(proc.after_sweep, axis)
 
     async def _sweepwise_inner(self, proc, writer, pbar, outer_index):
         """Sweep the innermost axis, buffer all points, then write_trace."""
@@ -252,13 +305,13 @@ class ExperimentRunner:
             elif rd.kind == DataKind.IMAGE:
                 buffers[rname] = np.empty((sweep.length,) + rd.shape, dtype=np.float32)
 
-        await _acall_hook(proc.before_sweep, inner_axis, proc)
+        await _acall_hook(proc.before_sweep, inner_axis)
 
         for i, val in enumerate(values):
             full_index = outer_index + (i,)
             await sweep.parameter.aset(val)
 
-            await _acall_hook(proc.before_point, full_index, proc)
+            await _acall_hook(proc.before_point, full_index)
             if proc.settle_time > 0:
                 await asyncio.sleep(proc.settle_time)
 
@@ -267,14 +320,14 @@ class ExperimentRunner:
                     proc.context.readouts[rname], proc
                 )
 
-            await _acall_hook(proc.after_point, full_index, proc)
+            await _acall_hook(proc.after_point, full_index)
             if pbar:
                 pbar.update(1)
 
         # Write the full inner sweep at once
         writer.write_trace(outer_index, buffers)
 
-        await _acall_hook(proc.after_sweep, inner_axis, proc)
+        await _acall_hook(proc.after_sweep, inner_axis)
 
     # ── PLANEWISE: buffer two innermost sweeps, write per plane ─────
 
@@ -297,11 +350,11 @@ class ExperimentRunner:
         sweep = proc.sweeps[axis]
         values = self._maybe_snake(proc, sweep, axis, index)
 
-        await _acall_hook(proc.before_sweep, axis, proc)
+        await _acall_hook(proc.before_sweep, axis)
         for i, val in enumerate(values):
             await sweep.parameter.aset(val)
             await self._planewise_outer(proc, writer, pbar, axis + 1, index + (i,))
-        await _acall_hook(proc.after_sweep, axis, proc)
+        await _acall_hook(proc.after_sweep, axis)
 
     async def _planewise_inner(self, proc, writer, pbar, outer_index):
         """Sweep the two innermost axes, buffer all points, then write_image."""
@@ -322,19 +375,19 @@ class ExperimentRunner:
             elif rd.kind == DataKind.IMAGE:
                 buffers[rname] = np.empty(plane_shape + rd.shape, dtype=np.float32)
 
-        await _acall_hook(proc.before_sweep, axis_row, proc)
+        await _acall_hook(proc.before_sweep, axis_row)
 
         for i, val_row in enumerate(self._maybe_snake(proc, sweep_row, axis_row, outer_index)):
             await sweep_row.parameter.aset(val_row)
 
-            await _acall_hook(proc.before_sweep, axis_col, proc)
+            await _acall_hook(proc.before_sweep, axis_col)
 
             col_values = self._maybe_snake(proc, sweep_col, axis_col, outer_index + (i,))
             for j, val_col in enumerate(col_values):
                 full_index = outer_index + (i, j)
                 await sweep_col.parameter.aset(val_col)
 
-                await _acall_hook(proc.before_point, full_index, proc)
+                await _acall_hook(proc.before_point, full_index)
                 if proc.settle_time > 0:
                     await asyncio.sleep(proc.settle_time)
 
@@ -343,16 +396,16 @@ class ExperimentRunner:
                         proc.context.readouts[rname], proc
                     )
 
-                await _acall_hook(proc.after_point, full_index, proc)
+                await _acall_hook(proc.after_point, full_index)
                 if pbar:
                     pbar.update(1)
 
-            await _acall_hook(proc.after_sweep, axis_col, proc)
+            await _acall_hook(proc.after_sweep, axis_col)
 
         # Write the full 2D plane at once
         writer.write_image(outer_index, buffers)
 
-        await _acall_hook(proc.after_sweep, axis_row, proc)
+        await _acall_hook(proc.after_sweep, axis_row)
 
     # ── ALL: buffer everything, write once at the end ─────────────────
 
@@ -377,7 +430,7 @@ class ExperimentRunner:
 
     async def _all_loop(self, proc, buffers, pbar, axis, index):
         if axis == proc.ndim:
-            await _acall_hook(proc.before_point, index, proc)
+            await _acall_hook(proc.before_point, index)
             if proc.settle_time > 0:
                 await asyncio.sleep(proc.settle_time)
 
@@ -386,7 +439,7 @@ class ExperimentRunner:
                     proc.context.readouts[rname], proc
                 )
 
-            await _acall_hook(proc.after_point, index, proc)
+            await _acall_hook(proc.after_point, index)
             if pbar:
                 pbar.update(1)
             return
@@ -394,11 +447,11 @@ class ExperimentRunner:
         sweep = proc.sweeps[axis]
         values = self._maybe_snake(proc, sweep, axis, index)
 
-        await _acall_hook(proc.before_sweep, axis, proc)
+        await _acall_hook(proc.before_sweep, axis)
         for i, val in enumerate(values):
             await sweep.parameter.aset(val)
             await self._all_loop(proc, buffers, pbar, axis + 1, index + (i,))
-        await _acall_hook(proc.after_sweep, axis, proc)
+        await _acall_hook(proc.after_sweep, axis)
 
     # ── Shared helpers ────────────────────────────────────────────────
 
@@ -437,8 +490,11 @@ class ExperimentRunner:
     # ── Monitor mode ──────────────────────────────────────────────────
 
     def run_monitor(self, procedure: MonitorProcedure) -> Path:
-        """Run time-series monitoring synchronously."""
-        return asyncio.run(self.arun_monitor(procedure))
+        """Run time-series monitoring synchronously.
+
+        Works both from scripts and Jupyter notebooks.
+        """
+        return _run_coro(self.arun_monitor(procedure))
 
     async def arun_monitor(self, proc: MonitorProcedure) -> Path:
         """Run time-series monitoring asynchronously."""
@@ -459,7 +515,7 @@ class ExperimentRunner:
             tags=proc.tags,
         )
 
-        await _acall_hook(proc.before_experiment, proc)
+        await _acall_hook(proc.before_experiment)
 
         start_time = time.time()
         sample_idx = 0
@@ -500,7 +556,7 @@ class ExperimentRunner:
         meta = {**proc.context.metadata, **proc.metadata, "status": "completed"}
         writer.close(meta=meta)
 
-        await _acall_hook(proc.after_experiment, proc)
+        await _acall_hook(proc.after_experiment)
 
         print(f"Monitor '{proc.name}' completed. Data saved to: {data_dir}")
         return data_dir

@@ -114,11 +114,11 @@ class Procedure:
     Hooks
     -----
     before_experiment, after_experiment : callable or None
-        Called once at start/end. Signature: (procedure) -> None
+        Called once at start/end. Signature: () -> None
     before_point, after_point : callable or None
-        Called around each measurement point. Signature: (index, procedure) -> None
+        Called around each measurement point. Signature: (index_tuple) -> None
     before_sweep, after_sweep : callable or None
-        Called before/after each inner sweep. Signature: (axis_index, procedure) -> None
+        Called before/after each sweep axis. Signature: (axis_index) -> None
     """
 
     name: str
@@ -187,9 +187,9 @@ class MonitorProcedure:
     Hooks
     -----
     before_experiment, after_experiment : callable or None
-        Called once at start/end.
+        Called once at start/end. Signature: () -> None
     after_point : callable or None
-        Called after each read with (sample_index, data_dict).
+        Called after each read. Signature: (sample_index, data_dict) -> None
     """
 
     name: str
