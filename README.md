@@ -1,6 +1,8 @@
-# Orchid
+<p align="left">
+<img src="docs/logo.png" alt="logo" width="350"/>
+</p>
 
-**Orchestrating Instruments & Data** — a Python package for automated lab experiment control.
+**OrchID / Orchestrating Instruments & Data** — a Python package for automated lab experiment control.
 
 Orchid connects your lab instruments (pymeasure, qcodes, or custom drivers) to a clean sweep/monitor engine with automatic data saving via [zarro](https://github.com/eeroqlab/zarro).
 
