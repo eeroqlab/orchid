@@ -18,12 +18,14 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [Step 4: Procedures](#step-4-procedures)
   - [Step 5: Running Experiments](#step-5-running-experiments)
   - [Step 6: Reading Data Back](#step-6-reading-data-back)
+  - [Step 7: Live Plotting](#step-7-live-plotting)
 - [Cookbook](#cookbook)
   - [1D Sweep](#1d-sweep)
   - [2D Sweep](#2d-sweep)
   - [2D Sweep with Snake Scan](#2d-sweep-with-snake-scan)
   - [Hysteresis (Forward + Backward)](#hysteresis-forward--backward)
   - [Time-Series Monitoring](#time-series-monitoring)
+  - [Background Monitoring](#background-monitoring)
   - [Custom Hooks](#custom-hooks)
   - [Mixed Readouts (Scalar + Trace)](#mixed-readouts-scalar--trace)
   - [Async Usage](#async-usage)
@@ -36,6 +38,8 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [Sweep](#sweep)
   - [Procedure](#procedure)
   - [MonitorProcedure](#monitorprocedure)
+  - [PlotSpec](#plotspec)
+  - [LivePlotter](#liveplotter)
   - [WriteMode](#writemode)
   - [ErrorPolicy](#errorpolicy)
   - [ExperimentRunner](#experimentrunner)
@@ -516,8 +520,23 @@ data_dir = runner.run(proc)            # sync
 data_dir = await runner.arun(proc)     # async
 
 # Monitor experiment
-data_dir = runner.run_monitor(monitor)            # sync
+data_dir = runner.run_monitor(monitor)            # sync (blocking)
 data_dir = await runner.arun_monitor(monitor)     # async
+
+# Monitor in background (non-blocking) — change parameters while running
+runner.run_monitor(monitor, background=True)
+ctx["Vgt"] = 0.5   # change parameters from the next cell
+data_dir = runner.stop_monitor()  # stop and get data path
+```
+
+#### Interrupt handling
+
+Pressing `Ctrl+C` (or interrupting the Jupyter kernel) cleanly stops the experiment, saves all collected data with `status: "interrupted"` in the metadata, and prints a short message — no tracebacks:
+
+```
+my_sweep:   5%|█         | 5/100 [00:02<00:45]
+
+Experiment 'my_sweep' interrupted. Data saved to: data/0003
 ```
 
 The runner:
@@ -656,6 +675,189 @@ print(meta["T_mc"])       # 0.015
 
 ---
 
+### Step 7: Live Plotting
+
+Orchid provides built-in live plotting using a Dash server that opens in a **separate browser window**. The plots update in real time as data is acquired. Create a `LivePlotter` with one or more `PlotSpec` objects and pass it to the runner.
+
+#### 1D sweep — line plot
+
+```python
+from orchid import LivePlotter, PlotSpec
+
+plotter = LivePlotter([PlotSpec(x="Vgt", y="lockin_X")])
+runner.run(proc, plotter=plotter)
+# A live line plot appears and updates as data is acquired
+```
+
+#### 2D sweep — heatmap
+
+For 2D scans, specify `x` (inner sweep), `y` (outer sweep), and `z` (readout for color). The heatmap fills row-by-row as each inner sweep completes:
+
+```python
+plotter = LivePlotter([PlotSpec(x="fac", y="Vgt", z="lockin_X")])
+runner.run(proc_2d, plotter=plotter)
+```
+
+#### Multiple subplots
+
+```python
+plotter = LivePlotter([
+    PlotSpec(x="Vgt", y="lockin_X"),
+    PlotSpec(x="Vgt", y="lockin_Y"),
+])
+runner.run(proc, plotter=plotter)
+```
+
+#### Time-series monitoring
+
+When `x="_time"`, the x-axis shows elapsed time starting from zero. The axis label auto-scales: seconds (s) for < 2 min, minutes (min) for < 2 hr, hours (hr) beyond that.
+
+```python
+plotter = LivePlotter([PlotSpec(x="_time", y="temperature")])
+runner.run_monitor(monitor, plotter=plotter)
+```
+
+With background mode — change parameters while monitoring:
+
+```python
+plotter = LivePlotter([PlotSpec(x="_time", y="lockin_X")])
+runner.run_monitor(monitor, plotter=plotter, background=True)
+
+# In the next cell:
+ctx["Vgt"] = 0.5   # change gate voltage while monitoring
+
+# When done:
+data_dir = runner.stop_monitor()
+```
+
+#### Custom update function
+
+When `update_func` is set on a PlotSpec, the default line/heatmap logic is skipped entirely. Instead, your function is called every time new data is written. It receives three arguments:
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `fig` | `FigureWidget` | The plotly figure. `fig.data[0]` is the trace for the first PlotSpec, `fig.data[1]` for the second, etc. |
+| `index` | `tuple` | Current sweep index, e.g. `(3,)` for 1D, `(2, 5)` for 2D. For monitors, this is `sample_idx` (int). |
+| `data` | `dict` | Readout name to value(s) just measured. Scalar for POINTWISE, array for SWEEPWISE. |
+
+**Plot magnitude of a complex trace:**
+
+```python
+import numpy as np
+
+def plot_s21_mag(fig, index, data):
+    s21 = data["S21"]
+    mag_db = 20 * np.log10(np.abs(s21))
+    fig.data[0].y = mag_db
+
+plotter = LivePlotter([PlotSpec(x="freq", y="S21", update_func=plot_s21_mag)])
+runner.run(proc, plotter=plotter)
+```
+
+**Accumulate points with color coding:**
+
+```python
+xs, ys = [], []
+
+def accumulate(fig, index, data):
+    xs.append(index[0])
+    ys.append(data["lockin_X"])
+    colors = ["red" if v > 0.5 else "blue" for v in ys]
+
+    with fig.batch_update():
+        fig.data[0].x = xs
+        fig.data[0].y = ys
+        fig.data[0].marker.color = colors
+
+plotter = LivePlotter([PlotSpec(x="Vgt", y="lockin_X", update_func=accumulate)])
+runner.run(proc, plotter=plotter)
+```
+
+**2D heatmap with derivative (SWEEPWISE):**
+
+```python
+import numpy as np
+
+# In SWEEPWISE mode, data["lockin_X"] is a full row (array)
+z_matrix = np.full((50, 200), np.nan)
+
+def plot_derivative(fig, index, data):
+    row = index[0]  # outer sweep index
+    trace = data["lockin_X"]  # shape (200,)
+    z_matrix[row, :] = np.gradient(trace)
+    fig.data[0].z = z_matrix
+
+plotter = LivePlotter([PlotSpec(x="fac", y="lockin_X", update_func=plot_derivative)])
+runner.run(proc_2d, plotter=plotter)
+```
+
+**Key points:**
+- `fig.data[N]` corresponds to the Nth `PlotSpec` in the list
+- Use `with fig.batch_update():` when updating multiple properties at once (prevents flicker)
+- Capture external state via closures (like `z_matrix` or `xs, ys` above)
+- For POINTWISE: called every point, `data` values are scalars
+- For SWEEPWISE: called every inner sweep, `data` values are arrays
+
+#### Plot update frequency vs write mode
+
+The plot update frequency (`update_every`) is **independent** of the data write mode (`write_mode`). You can save data efficiently in large batches while still seeing every point appear live:
+
+```python
+# Save per sweep (fast I/O), but plot every point (real-time visual)
+proc = Procedure(..., write_mode=WriteMode.SWEEPWISE)
+plotter = LivePlotter([PlotSpec(x="Vgt", y="sig", update_every="point")])
+runner.run(proc, plotter=plotter)
+
+# Save per sweep, plot per sweep (both aligned — default)
+plotter = LivePlotter([PlotSpec(x="Vgt", y="sig", update_every="sweep")])
+
+# Save per plane, plot per sweep (see rows fill in on a 3D scan)
+proc = Procedure(..., write_mode=WriteMode.PLANEWISE)
+plotter = LivePlotter([PlotSpec(x="fac", y="sig", update_every="sweep")])
+
+# Multiple subplots with different update rates
+plotter = LivePlotter([
+    PlotSpec(x="Vgt", y="lockin_X", update_every="point"),   # real-time
+    PlotSpec(x="fac", y="S21", update_every="sweep"),         # per row
+])
+```
+
+| `update_every` | Updates on                           |
+|-----------------|--------------------------------------|
+| `"point"`       | Every measurement point              |
+| `"sweep"`       | Each inner sweep completion          |
+| `"plane"`       | Each 2D plane completion (3D scans)  |
+
+#### Configuration
+
+```python
+plotter = LivePlotter(
+    [PlotSpec(x="Vgt", y="sig")],
+    port=8050,            # Dash server port (default 8050)
+    height=400,           # pixels per subplot
+    width=800,            # figure width
+    open_browser=True,    # auto-open browser (default True)
+    update_interval=500,  # poll interval in ms (default 500)
+)
+```
+
+The Dash server runs on a background daemon thread. After the experiment completes, the server stops refreshing (zoom/pan is preserved) but stays running for inspection. Shut it down to free the port with:
+
+```python
+plotter.stop()
+```
+
+A `LivePlotter` can be reused across experiments — `setup()` automatically stops the previous server and resets all state:
+
+```python
+plotter = LivePlotter([PlotSpec(x="Vgt", y="sig", update_every="point")])
+
+runner.run(proc1, plotter=plotter)  # first experiment
+runner.run(proc2, plotter=plotter)  # fresh plot, old server cleaned up
+```
+
+---
+
 ## Cookbook
 
 ### 1D Sweep
@@ -759,6 +961,33 @@ monitor = MonitorProcedure(
 ```
 
 Stop manually with `Ctrl+C` — data is always saved.
+
+### Background Monitoring
+
+Run monitoring in the background so you can change parameters from other cells:
+
+```python
+runner = ExperimentRunner()
+plotter = LivePlotter([PlotSpec(x="_time", y="lockin_X")])
+
+# Cell 1: start
+runner.run_monitor(monitor, plotter=plotter, background=True)
+```
+
+```python
+# Cell 2: change parameters while monitoring
+ctx["Vgt"] = 0.5
+```
+
+```python
+# Cell 3: change again
+ctx["Vgt"] = 1.0
+```
+
+```python
+# Cell 4: stop and save
+data_dir = runner.stop_monitor()
+```
 
 ### Custom Hooks
 
@@ -1088,6 +1317,84 @@ Data is saved via zarro's `StreamingWriter` with a `_time` timestamp array.
 
 ---
 
+### PlotSpec
+
+```python
+from orchid import PlotSpec
+```
+
+Describes one subplot in a `LivePlotter`.
+
+| Argument      | Type               | Default   | Description                                      |
+|---------------|--------------------|-----------|--------------------------------------------------|
+| `x`           | `str`              | required  | Line: x-axis param. Heatmap: x-axis sweep param. Monitor: `"_time"`. |
+| `y`           | `str`              | required  | Line: readout name (y-axis). Heatmap: y-axis sweep param. |
+| `z`           | `str` or `None`    | `None`    | Heatmap only: readout name for color values. Required for heatmaps. |
+| `plot_type`   | `str`              | `"auto"`  | `"line"`, `"heatmap"`, or `"auto"` (infer from ndim) |
+| `update_every`| `str`              | `"sweep"` | `"point"`, `"sweep"`, or `"plane"`               |
+| `update_func` | `callable` or `None` | `None`  | Custom `(fig_dict, index, data) -> None`         |
+
+---
+
+### LivePlotter
+
+```python
+from orchid import LivePlotter
+```
+
+Live plotting via a Dash server in a separate browser window.
+
+| Argument          | Type              | Default | Description                          |
+|-------------------|-------------------|---------|--------------------------------------|
+| `plots`           | `list[PlotSpec]`  | required| Subplot specifications               |
+| `port`            | `int`             | `8050`  | Dash server port                     |
+| `height`          | `int`             | `350`   | Height in pixels per subplot         |
+| `width`           | `int`             | `700`   | Figure width in pixels               |
+| `open_browser`    | `bool`            | `True`  | Auto-open browser on start           |
+| `update_interval` | `int`             | `500`   | Dash polling interval in ms          |
+
+#### Lifecycle methods (called by the runner)
+
+| Method                                    | When called                      |
+|-------------------------------------------|----------------------------------|
+| `setup(proc)`                             | Before experiment — resets state, stops previous server, creates figure, starts new Dash server |
+| `update_point(index, data, sweep_values)` | After every measurement point    |
+| `update_sweep(outer_index, data, sweep_values)` | After each inner sweep completes |
+| `update_plane(outer_index, data, sweep_values)` | After each 2D plane completes |
+| `update_monitor(sample_idx, data, timestamp)` | After each append (monitors). `x="_time"` auto-scales to s/min/hr from zero. |
+| `finalize()`                              | After experiment — stops refreshing (zoom/pan preserved) |
+| `stop()`                                  | Shut down the Dash server and free the port |
+
+Each subplot only refreshes when the event matches its `update_every` setting. For example, a `PlotSpec` with `update_every="point"` will update on `update_point()` calls but ignore `update_sweep()` and `update_plane()` calls.
+
+**Reusable:** A `LivePlotter` can be reused across experiments — `setup()` automatically stops the old server and resets all state.
+
+#### Time axis formatting
+
+When `x="_time"` is used (monitoring mode), the x-axis shows elapsed time starting from zero with auto-scaling units:
+
+| Elapsed time | x-axis unit | Label        |
+|--------------|-------------|--------------|
+| < 2 minutes  | seconds     | Time (s)     |
+| < 2 hours    | minutes     | Time (min)   |
+| >= 2 hours   | hours       | Time (hr)    |
+
+The label updates automatically as time progresses. Existing data points are rescaled when the unit changes.
+
+#### Usage
+
+```python
+plotter = LivePlotter([PlotSpec(x="Vgt", y="lockin_X")])
+runner.run(proc, plotter=plotter)
+# Browser opens at http://localhost:8050 with live-updating plot
+
+plotter.stop()  # shut down server to free port (optional)
+```
+
+Requires `plotly` and `dash` (install with `pip install orchid[plot]`).
+
+---
+
 ### WriteMode
 
 ```python
@@ -1125,7 +1432,7 @@ from orchid import ErrorPolicy
 from orchid import ExperimentRunner
 ```
 
-Executes procedures and manages data flow to zarro.
+Executes procedures and manages data flow to zarro. Internally delegates sweep execution to a **write strategy** class selected by `procedure.write_mode`.
 
 | Argument             | Type   | Default | Description                           |
 |----------------------|--------|---------|---------------------------------------|
@@ -1135,27 +1442,51 @@ Executes procedures and manages data flow to zarro.
 
 | Method                                  | Description                              |
 |-----------------------------------------|------------------------------------------|
-| `run(procedure) -> Path`                | Run sweep experiment (sync)              |
-| `await arun(procedure) -> Path`         | Run sweep experiment (async)             |
-| `run_monitor(procedure) -> Path`        | Run time-series monitor (sync)           |
-| `await arun_monitor(procedure) -> Path` | Run time-series monitor (async)          |
+| `run(procedure, plotter=None) -> Path`  | Run sweep experiment (sync)              |
+| `await arun(procedure, plotter=None) -> Path` | Run sweep experiment (async)        |
+| `run_monitor(procedure, plotter=None, background=False) -> Path` | Run time-series monitor |
+| `await arun_monitor(procedure, plotter=None) -> Path` | Run monitor (async)       |
+| `stop_monitor() -> Path`               | Stop a background monitor and return data path |
 
 All methods return the `Path` to the output data directory.
 
-**Sweep execution flow:**
+**`run_monitor` parameters:**
 
-```
-for each outer value:           # sweeps[0]
-  set sweeps[0].parameter
-  for each inner value:         # sweeps[1]
-    set sweeps[1].parameter
-    ...                         # sweeps[N] (recursive)
-      wait settle_time
-      read all readouts
-      write_point(index, data)
+| Argument     | Type   | Default | Description                                    |
+|--------------|--------|---------|------------------------------------------------|
+| `procedure`  | `MonitorProcedure` | required | The monitoring procedure         |
+| `plotter`    | `LivePlotter` or `None` | `None` | Live plotter                   |
+| `background` | `bool` | `False` | If True, run in background thread and return immediately. Use `ctx["Vgt"] = 0.5` to change parameters, `runner.stop_monitor()` to stop. |
+
+**Interrupt handling:** `Ctrl+C` cleanly stops any running experiment, saves collected data with `status: "interrupted"` in metadata, and prints a single-line message. No tracebacks in Jupyter.
+
+#### Write strategies
+
+The runner dispatches sweep execution to a strategy class based on `write_mode`:
+
+```python
+strategy = _STRATEGY_MAP[proc.write_mode](proc, writer, pbar)
+await strategy.execute()
 ```
 
-**Monitor execution flow:**
+| `WriteMode`  | Strategy class       | Description                                    |
+|--------------|----------------------|------------------------------------------------|
+| `POINTWISE`  | `PointwiseStrategy`  | Recursive loop, `write_point()` at each leaf   |
+| `SWEEPWISE`  | `SweepwiseStrategy`  | Buffer innermost axis, `write_trace()` per row |
+| `PLANEWISE`  | `PlanewiseStrategy`  | Buffer two innermost axes, `write_image()` per plane |
+| `ALL`        | `AllStrategy`        | Buffer everything, single `write_all()`        |
+
+All strategies inherit from `WriteStrategy`, which provides shared helpers:
+
+| Method               | Description                                           |
+|----------------------|-------------------------------------------------------|
+| `_maybe_snake()`     | Reverse sweep values on odd parent index (snake scan) |
+| `_safe_read()`       | Read with error policy (retry/skip/ignore)            |
+| `_nan_value()`       | NaN placeholder matching readout shape                |
+| `_allocate_buffers()` | Pre-allocate numpy arrays for all readouts           |
+| `_outer_loop()`      | Generic recursive loop through outer sweep axes       |
+
+**Monitor execution flow** (not strategy-based — handled directly by ExperimentRunner):
 
 ```
 loop:
@@ -1258,6 +1589,16 @@ data/0001/
                      |  .run() / .arun()    |
                      |  .run_monitor()      |
                      +-----------+-----------+
+                                 |
+              +------------------+------------------+
+              |                  |                   |
+    +---------+------+ +--------+--------+ +--------+--------+
+    | WriteStrategy  | | SweepwiseSt.    | | AllStrategy     |
+    | (base class)   | | PlanewiseSt.    | | (buffer all)    |
+    | PointwiseSt.   | | (buffer inner)  | |                 |
+    +--------+-------+ +--------+--------+ +--------+--------+
+              |                  |                   |
+              +------------------+------------------+
                                  |
                      +-----------+-----------+
                      |       zarro          |
