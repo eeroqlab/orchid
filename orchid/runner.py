@@ -442,6 +442,7 @@ class ExperimentRunner:
         self._monitor_stop = threading.Event()
         self._monitor_thread: threading.Thread | None = None
         self._monitor_result: Path | None = None
+        self._monitor_plotter = None
 
     def _get_data_dir(self, proc: Procedure | MonitorProcedure) -> Path:
         """Determine the output directory for this run."""
@@ -451,7 +452,8 @@ class ExperimentRunner:
             return eid.next_dir()
         return root / proc.name
 
-    def run(self, procedure: Procedure, plotter=None) -> Path:
+    def run(self, procedure: Procedure, plotter=None,
+            return_path: bool = False) -> Path | None:
         """Run a sweep experiment synchronously.
 
         Works both from scripts (no event loop) and from Jupyter
@@ -465,8 +467,14 @@ class ExperimentRunner:
             The experiment procedure to run.
         plotter : LivePlotter, optional
             Live plotter for real-time visualization.
+        return_path : bool
+            If True, return the Path to the saved data directory.
+            Default is False (returns None).
 
-        Returns the path to the saved data directory.
+        Returns
+        -------
+        Path or None
+            Data directory path if ``return_path=True``, otherwise None.
         """
         # Store references so the interrupt handler can do cleanup
         # even when asyncio.run() kills arun() before it can clean up.
@@ -475,9 +483,11 @@ class ExperimentRunner:
             "proc": procedure, "plotter": plotter,
         }
         try:
-            return _run_coro(self.arun(procedure, plotter=plotter))
+            result = _run_coro(self.arun(procedure, plotter=plotter))
         except (KeyboardInterrupt, asyncio.CancelledError):
-            return self._handle_interrupt()
+            result = self._handle_interrupt()
+
+        return result if return_path else None
 
     def _handle_interrupt(self) -> Path | None:
         """Clean up after KeyboardInterrupt — save data, close progress bar."""
@@ -493,7 +503,7 @@ class ExperimentRunner:
                 pass
         if s["plotter"]:
             try:
-                s["plotter"].finalize()
+                s["plotter"].stop(_silent=True)
             except Exception:
                 pass
         data_dir = s["data_dir"]
@@ -564,7 +574,7 @@ class ExperimentRunner:
         await _acall_hook(proc.after_experiment)
 
         if plotter is not None:
-            plotter.finalize()
+            plotter.stop()
 
         print(f"Experiment '{proc.name}' completed. Data saved to: {data_dir}")
         return data_dir
@@ -572,7 +582,8 @@ class ExperimentRunner:
     # ── Monitor mode ──────────────────────────────────────────────────
 
     def run_monitor(self, procedure: MonitorProcedure, plotter=None,
-                     background: bool = False) -> Path | None:
+                     background: bool = False,
+                     return_path: bool = False) -> Path | None:
         """Run time-series monitoring.
 
         Parameters
@@ -585,29 +596,37 @@ class ExperimentRunner:
             If True, run in a background thread and return immediately.
             Use ``ctx["Vgt"] = 0.5`` in the next cell to change parameters
             while monitoring. Call ``runner.stop_monitor()`` to stop.
+        return_path : bool
+            If True, return the Path to the saved data directory.
+            Default is False (returns None).
 
         Returns
         -------
         Path or None
-            Data directory path. In background mode, returns None immediately;
-            the path is available via ``runner.stop_monitor()`` after stopping.
+            Data directory path if ``return_path=True``, otherwise None.
+            In background mode, always returns None immediately; the path
+            is available via ``runner.stop_monitor()`` after stopping.
         """
         if background:
             return self._run_monitor_background(procedure, plotter)
 
+        self._monitor_stop.clear()
         self._run_state = {
             "writer": None, "pbar": None, "data_dir": None,
             "proc": procedure, "plotter": plotter,
         }
         try:
-            return _run_coro(self.arun_monitor(procedure, plotter=plotter))
+            result = _run_coro(self.arun_monitor(procedure, plotter=plotter))
         except (KeyboardInterrupt, asyncio.CancelledError):
-            return self._handle_interrupt()
+            result = self._handle_interrupt()
+
+        return result if return_path else None
 
     def _run_monitor_background(self, procedure, plotter) -> None:
         """Start monitor in a background thread."""
         self._monitor_stop.clear()
         self._monitor_result = None
+        self._monitor_plotter = plotter
 
         def _target():
             loop = asyncio.new_event_loop()
@@ -626,6 +645,11 @@ class ExperimentRunner:
         self._monitor_thread.start()
         print(f"Monitor '{procedure.name}' running in background. Use runner.stop_monitor() to stop.")
 
+    @property
+    def is_monitoring(self) -> bool:
+        """True if a background monitor is currently running."""
+        return self._monitor_thread is not None and self._monitor_thread.is_alive()
+
     def stop_monitor(self) -> Path | None:
         """Stop a background monitor and return the data directory.
 
@@ -638,6 +662,9 @@ class ExperimentRunner:
         if self._monitor_thread is not None:
             self._monitor_thread.join(timeout=10)
             self._monitor_thread = None
+        if self._monitor_plotter is not None:
+            self._monitor_plotter.stop(_silent=True)
+            self._monitor_plotter = None
         result = self._monitor_result
         if result:
             print(f"Monitor stopped. Data saved to: {result}")
@@ -658,6 +685,7 @@ class ExperimentRunner:
         writer = StreamingWriter(
             root=data_dir,
             readouts=readout_shapes,
+            chunk_size=proc.chunk_size,
             overwrite=False,
             tags=proc.tags,
         )
@@ -665,10 +693,21 @@ class ExperimentRunner:
         if plotter is not None:
             plotter.setup(proc)
 
+        # Populate run state so interrupt handler can print the data path
+        if hasattr(self, "_run_state"):
+            self._run_state.update(data_dir=data_dir)
+
         await _acall_hook(proc.before_experiment)
 
         start_time = time.time()
         sample_idx = 0
+
+        # Register event callback — fires on every ctx["param"] = value
+        def _on_event(entry):
+            if plotter is not None:
+                plotter.notify_event(entry["time"], entry["param"], entry["value"])
+
+        proc.context._start_event_log(on_event=_on_event)
 
         interrupted = False
         try:
@@ -711,10 +750,21 @@ class ExperimentRunner:
 
         except KeyboardInterrupt:
             interrupted = True
+        finally:
+            event_log = proc.context._stop_event_log()
 
         status = "interrupted" if interrupted else "completed"
         meta = {**proc.context.metadata, **proc.metadata, "status": status}
         writer.close(meta=meta)
+
+        # Write events.yaml if any parameter changes were recorded
+        if event_log:
+            import yaml as _yaml
+            for entry in event_log:
+                entry["elapsed"] = round(entry["time"] - start_time, 3)
+            (data_dir / "events.yaml").write_text(
+                _yaml.safe_dump(event_log, sort_keys=True, allow_unicode=True)
+            )
 
         await _acall_hook(proc.after_experiment)
 

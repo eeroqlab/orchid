@@ -179,6 +179,9 @@ class MonitorProcedure:
         Total duration in seconds. None = run until stopped.
     stop_condition : callable or None
         Called after each read with (data_dict) -> bool. Return True to stop.
+    chunk_size : int
+        Number of samples buffered in memory before flushing to disk (default 256).
+        Smaller values reduce potential data loss on crash; larger values reduce I/O.
     tags : list of str
         Free-form tags.
     metadata : dict
@@ -198,6 +201,7 @@ class MonitorProcedure:
     interval: float = 1.0
     duration: float | None = None
     stop_condition: Callable | None = None
+    chunk_size: int = 256
     tags: list[str] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
 

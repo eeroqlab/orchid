@@ -2,7 +2,7 @@
 <img src="docs/logo.png" alt="logo" width="350"/>
 </p>
 
-**OrchID / Orchestrating Instruments & Data** — a Python package for automated lab experiment control.
+**Orchestrating Instruments & Data** — a Python package for automated lab experiment control.
 
 Orchid connects your lab instruments (pymeasure, qcodes, or custom drivers) to a clean sweep/monitor engine with automatic data saving via [zarro](https://github.com/eeroqlab/zarro).
 
@@ -15,6 +15,7 @@ Orchid connects your lab instruments (pymeasure, qcodes, or custom drivers) to a
 - **Flexible write modes** — write per point, per sweep, per plane, or all at once
 - **Custom hooks** — inject logic before/after experiments, sweeps, and measurement points
 - **Async support** — both sync and async instrument drivers
+- **Live plotting** — real-time plotly FigureWidget (line, heatmap, custom) in Jupyter
 - **Configurable error handling** — stop, retry+skip, or ignore
 - **Automatic data saving** — Zarr v3 (via zarro) with metadata YAML
 - **Live snapshot** — `ctx.snapshot()` prints a formatted table of all current values
@@ -128,4 +129,4 @@ Full tutorial, cookbook, and API reference: **[docs/orchid.md](docs/orchid.md)**
 - `tqdm`
 - `tabulate`
 - `zarro`
-- Optional: `qcodes`, `pymeasure`
+- Optional: `plotly` (for live plotting), `qcodes`, `pymeasure`

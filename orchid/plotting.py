@@ -12,6 +12,32 @@ import numpy as np
 
 
 @dataclass
+class EventLineConfig:
+    """Visual properties for parameter-change event markers on time-series plots.
+
+    Parameters
+    ----------
+    color : str
+        Line and label color. Any CSS/plotly color string.
+    width : int
+        Line width in pixels.
+    dash : str
+        Line style: ``"solid"``, ``"dot"``, ``"dash"``, ``"longdash"``, ``"dashdot"``.
+    font_size : int
+        Label font size in points.
+
+    Examples
+    --------
+    >>> EventLineConfig(color="rgba(0,150,255,0.8)", dash="dot", width=2)
+    """
+
+    color: str = "rgba(255,80,80,0.7)"
+    width: int = 1
+    dash: str = "dash"
+    font_size: int = 9
+
+
+@dataclass
 class PlotSpec:
     """Describes one subplot in a LivePlotter.
 
@@ -111,6 +137,7 @@ class LivePlotter:
         width: int = 700,
         open_browser: bool = True,
         update_interval: int = 500,
+        event_line: EventLineConfig | None = None,
     ):
         self.specs = plots
         self.port = port
@@ -118,6 +145,7 @@ class LivePlotter:
         self.width = width
         self.open_browser = open_browser
         self.update_interval = update_interval
+        self.event_line = event_line if event_line is not None else EventLineConfig()
 
         # Internal state — all plain dicts/lists, no plotly objects
         self._fig_dict: dict | None = None
@@ -125,6 +153,7 @@ class LivePlotter:
         self._resolved_types: list[str] = []
         self._sweep_data: dict[int, dict] = {}
         self._server_thread: threading.Thread | None = None
+        self._wsgi_server = None
         self._dash_app = None
         self._data_version = 0
         self._last_sent_version = -1
@@ -134,11 +163,9 @@ class LivePlotter:
 
     def setup(self, proc) -> None:
         """Initialize figure and start Dash server. Called once before experiment."""
-        # Stop previous server if still running
-        if self._dash_app is not None:
-            self.stop()
-
-        # Reset all state
+        # Reset all state — but keep the server running if it's already up.
+        # Restarting the server causes the browser to reconnect mid-session
+        # and briefly show stale data before the first callback fires.
         self._proc = proc
         self._fig_dict = None
         self._resolved_types = []
@@ -167,8 +194,11 @@ class LivePlotter:
         # won't auto-display it via _repr_html_).
         self._fig_dict = self._build_figure_dict(proc, n)
 
-        # Start the Dash server
-        self._start_dash()
+        # Start the server only once. If it's already running (reuse across
+        # experiments), the browser will receive the new figure on the next
+        # callback poll — no reconnection, no stale data flash.
+        if not self.is_running:
+            self._start_dash()
 
     def update_point(self, index: tuple, data: dict, sweep_values: dict) -> None:
         """Called by the runner after every measurement point."""
@@ -292,30 +322,93 @@ class LivePlotter:
             return 3600.0
         return 1.0
 
+    @property
+    def is_running(self) -> bool:
+        """True if the Dash server is currently running."""
+        return (
+            self._server_thread is not None
+            and self._server_thread.is_alive()
+        )
+
+    def notify_event(self, timestamp: float, param: str, value) -> None:
+        """Mark a parameter change on all time-series subplots.
+
+        Called automatically by the runner when ``ctx["param"] = value``
+        is executed during a monitor run. Draws a vertical dashed line
+        and a label on every subplot whose x-axis is ``"_time"``.
+        """
+        if self._fig_dict is None or self._t0 is None:
+            return
+
+        elapsed = timestamp - self._t0
+        x_val, unit = self._format_elapsed(elapsed)
+
+        label = f"{param}={value:.4g}" if isinstance(value, (int, float)) else f"{param}={value}"
+
+        layout = self._fig_dict["layout"]
+        if "shapes" not in layout:
+            layout["shapes"] = []
+        if "annotations" not in layout:
+            layout["annotations"] = []
+
+        for i, spec in enumerate(self.specs):
+            if spec.x != "_time":
+                continue
+
+            xref = "x" if i == 0 else f"x{i + 1}"
+            y_axis_key = "yaxis" if i == 0 else f"yaxis{i + 1}"
+            domain = layout.get(y_axis_key, {}).get("domain", [0.0, 1.0])
+            y0, y1 = domain[0], domain[1]
+
+            layout["shapes"].append({
+                "type": "line",
+                "xref": xref,
+                "yref": "paper",
+                "x0": x_val,
+                "x1": x_val,
+                "y0": y0,
+                "y1": y1,
+                "line": {
+                    "color": self.event_line.color,
+                    "width": self.event_line.width,
+                    "dash": self.event_line.dash,
+                },
+            })
+            layout["annotations"].append({
+                "xref": xref,
+                "yref": "paper",
+                "x": x_val,
+                "y": y1,
+                "text": label,
+                "showarrow": False,
+                "textangle": -90,
+                "font": {"size": self.event_line.font_size, "color": self.event_line.color},
+                "xanchor": "left",
+                "yanchor": "top",
+            })
+
+        self._data_version += 1
+
     def finalize(self) -> None:
         """Called once after experiment completes. Server keeps running
         but stops refreshing so zoom/pan state is preserved."""
         self._stopped = True
 
-    def stop(self) -> None:
+    def stop(self, _silent: bool = False) -> None:
         """Stop the Dash server and free the port.
 
         After calling stop(), the browser page will show a connection
         error. The port becomes available for a new LivePlotter.
         """
         self._stopped = True
-        if self._dash_app is not None:
-            try:
-                import urllib.request
-                req = urllib.request.Request(
-                    f"http://localhost:{self.port}/_orchid_shutdown",
-                    method="POST",
-                )
-                urllib.request.urlopen(req, timeout=2)
-            except Exception:
-                pass
-            self._dash_app = None
-        print("Live plot server stopped.")
+        if self._wsgi_server is not None:
+            self._wsgi_server.shutdown()   # blocks until serve_forever() exits
+            self._wsgi_server.server_close()
+            self._wsgi_server = None
+        self._server_thread = None
+        self._dash_app = None
+        if not _silent:
+            print("Live plot server stopped.")
 
     # ── Figure construction (plain dicts only) ────────────────────────
 
@@ -409,21 +502,27 @@ class LivePlotter:
         for logger_name in ("werkzeug", "dash", "dash.dash", "flask", "flask.app"):
             logging.getLogger(logger_name).setLevel(logging.ERROR)
 
-        app = Dash(__name__)
+        app = Dash(__name__, update_title=None)
         app.title = self._proc.name if self._proc else "Orchid Live Plot"
         app.logger.setLevel(logging.ERROR)
         self._dash_app = app
 
-        app.layout = html.Div([
-            dcc.Graph(id="live-graph", figure=self._fig_dict),
-            dcc.Interval(
-                id="interval",
-                interval=self.update_interval,
-                n_intervals=0,
-            ),
-        ])
-
         plotter = self
+
+        # Callable layout: evaluated on every fresh browser load, so the
+        # browser always gets the current figure even after setup() replaces
+        # _fig_dict for a new experiment.
+        def serve_layout():
+            return html.Div([
+                dcc.Graph(id="live-graph", figure=plotter._fig_dict or {}),
+                dcc.Interval(
+                    id="interval",
+                    interval=self.update_interval,
+                    n_intervals=0,
+                ),
+            ])
+
+        app.layout = serve_layout
 
         @app.callback(
             Output("live-graph", "figure"),
@@ -438,16 +537,6 @@ class LivePlotter:
             plotter._last_sent_version = plotter._data_version
             return plotter._fig_dict
 
-        # Add a shutdown endpoint so stop() can kill the server
-        import flask
-
-        @app.server.route("/_orchid_shutdown", methods=["POST"])
-        def shutdown():
-            func = flask.request.environ.get("werkzeug.server.shutdown")
-            if func:
-                func()
-            return "OK"
-
         # Suppress the Flask "Serving Flask app" banner by disabling
         # Werkzeug's CLI banner at the source.
         try:
@@ -456,14 +545,15 @@ class LivePlotter:
         except (ImportError, AttributeError):
             pass
 
+        from werkzeug.serving import make_server
+
+        # Bind the socket on the main thread — fails immediately if port
+        # is already in use, before we even start the background thread.
+        srv = make_server("127.0.0.1", self.port, app.server)
+        self._wsgi_server = srv
+
         def run_server():
-            app.run(
-                port=self.port,
-                debug=False,
-                use_reloader=False,
-                # Prevent Dash from auto-displaying inline in Jupyter
-                jupyter_mode="_none",
-            )
+            srv.serve_forever()
 
         self._server_thread = threading.Thread(target=run_server, daemon=True)
         self._server_thread.start()
@@ -480,15 +570,21 @@ class LivePlotter:
     # ── Internal update methods ───────────────────────────────────────
 
     def _update_line(self, spec_idx, spec, data, sweep_values):
-        """Update a line trace — always shows only the current row.
+        """Update a line trace.
 
-        For sweep updates: replace with the full row at once.
-        For point updates: accumulate within the current row, reset
-        when a new inner sweep starts (x value <= previous x value).
+        x can be a sweep parameter name or a readout name.
+
+        Sweep parameter as x: shows only the current inner sweep row —
+        resets when a new inner sweep starts (x wraps back to start).
+
+        Readout as x: accumulates all points across the full experiment
+        (useful for readout-vs-readout plots, e.g. Lissajous).
         """
         state = self._sweep_data[spec_idx]
 
-        x_val = sweep_values.get(spec.x)
+        # x can be a sweep parameter or a readout
+        x_from_sweep = spec.x in sweep_values
+        x_val = sweep_values.get(spec.x) if x_from_sweep else data.get(spec.x)
         y_val = data[spec.y]
 
         if isinstance(x_val, np.ndarray):
@@ -496,10 +592,10 @@ class LivePlotter:
             state["x"] = x_val.tolist()
             state["y"] = y_val.tolist() if isinstance(y_val, np.ndarray) else [float(y_val)]
         else:
-            # Point-level update: detect new inner sweep and reset
             x_float = float(x_val) if x_val is not None else len(state["x"])
-            if len(state["x"]) >= 2 and x_float <= state["x"][0]:
-                # New inner sweep started — clear previous row
+            # Only reset on new inner sweep when x is a sweep parameter;
+            # readout-vs-readout plots accumulate all points.
+            if x_from_sweep and len(state["x"]) >= 2 and x_float <= state["x"][0]:
                 state["x"] = []
                 state["y"] = []
             state["x"].append(x_float)

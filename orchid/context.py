@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import time as _time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .instrument import InstrumentAdapter
 from .parameter import DataKind, Parameter, Readout
@@ -30,6 +31,10 @@ class ExperimentContext:
     instruments: dict[str, InstrumentAdapter] = field(default_factory=dict, init=False)
     parameters: dict[str, Parameter] = field(default_factory=dict, init=False)
     readouts: dict[str, Readout] = field(default_factory=dict, init=False)
+
+    # Event log — active only during run_monitor(); None when idle
+    _event_log: list | None = field(default=None, init=False, repr=False)
+    _event_callback: Callable | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         self.data_root = Path(self.data_root)
@@ -206,8 +211,35 @@ class ExperimentContext:
         """
         if name in self.parameters:
             self.parameters[name].set(value)
+            if self._event_log is not None:
+                entry = {
+                    "time": _time.time(),
+                    "param": name,
+                    "value": value,
+                }
+                self._event_log.append(entry)
+                if self._event_callback is not None:
+                    self._event_callback(entry)
         else:
             raise KeyError(f"No parameter named {name!r}")
+
+    def _start_event_log(self, on_event: Callable | None = None) -> None:
+        """Start recording parameter change events.
+
+        Called by ExperimentRunner at the start of a monitor run.
+        """
+        self._event_log = []
+        self._event_callback = on_event
+
+    def _stop_event_log(self) -> list:
+        """Stop recording and return the collected events.
+
+        Called by ExperimentRunner at the end of a monitor run.
+        """
+        log = self._event_log or []
+        self._event_log = None
+        self._event_callback = None
+        return log
 
     def snapshot(self, names: list[str] | None = None) -> None:
         """Print a table of current parameter and readout values.

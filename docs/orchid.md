@@ -941,7 +941,7 @@ monitor = MonitorProcedure(
     context=ctx,
     readouts=["lockin_X", "temperature"],
     interval=1.0,       # 1 second between reads
-    duration=3600.0,     # 1 hour
+    duration=3600.0,    # 1 hour
     tags=["stability"],
 )
 data_dir = ExperimentRunner().run_monitor(monitor)
@@ -961,6 +961,82 @@ monitor = MonitorProcedure(
 ```
 
 Stop manually with `Ctrl+C` — data is always saved.
+
+#### Controlling disk flush frequency
+
+Samples are buffered in memory and written to disk in batches. The `chunk_size` parameter
+controls how many samples accumulate before a flush:
+
+```python
+# Default: flush every 256 samples
+monitor = MonitorProcedure(..., interval=1.0)
+
+# Flush every 10 samples — safer on crash, more I/O
+monitor = MonitorProcedure(..., interval=0.1, chunk_size=10)
+
+# Flush every 1000 samples — less I/O, good for fast logging
+monitor = MonitorProcedure(..., interval=0.01, chunk_size=1000)
+
+# Flush after every sample — maximum safety
+monitor = MonitorProcedure(..., chunk_size=1)
+```
+
+Up to `chunk_size - 1` samples may be in memory at any time. On a clean exit or `Ctrl+C`,
+the remaining buffer is always flushed before the file is closed, so no data is lost under
+normal conditions. Only an abrupt process kill (power loss, `SIGKILL`) could lose buffered
+samples.
+
+### Parameter Event Logging
+
+While a background monitor is running, every `ctx["param"] = value` call is automatically recorded as a timestamped event. Events are saved to `events.yaml` alongside the data when the monitor finishes.
+
+```python
+runner.run_monitor(monitor, plotter=plotter, background=True)
+
+# These are recorded automatically:
+ctx["Vgt"] = 0.5    # t=12.3s
+ctx["Vgt"] = 1.0    # t=45.7s
+ctx["fac"] = 3000   # t=60.1s
+
+data_dir = runner.stop_monitor()
+```
+
+**Reading events back:**
+
+```python
+from orchid import read_events
+
+events = read_events(data_dir)
+for e in events:
+    print(f"t={e['elapsed']:.1f}s  {e['param']} → {e['value']}")
+# t=12.3s  Vgt → 0.5
+# t=45.7s  Vgt → 1.0
+# t=60.1s  fac → 3000
+```
+
+Each event dict contains:
+
+| Key       | Description                          |
+|-----------|--------------------------------------|
+| `time`    | Unix timestamp (float)               |
+| `elapsed` | Seconds from monitor start (float)   |
+| `param`   | Parameter name (str)                 |
+| `value`   | Value that was set                   |
+
+**Live plot integration:**
+
+If a `LivePlotter` is passed with a `PlotSpec(x="_time", ...)`, each parameter change appears as a vertical dashed red line annotated with the parameter name and value — visible in real time as you change parameters:
+
+```python
+plotter = LivePlotter([PlotSpec(x="_time", y="lockin_X")])
+runner.run_monitor(monitor, plotter=plotter, background=True)
+
+ctx["Vgt"] = 0.5   # red dashed line appears on the plot immediately
+```
+
+If no events occurred during the run, no `events.yaml` is written.
+
+---
 
 ### Background Monitoring
 
@@ -1307,13 +1383,45 @@ Time-series monitoring procedure (no sweeps).
 | `interval`         | `float`             | `1.0`                | Seconds between reads                       |
 | `duration`         | `float` or `None`   | `None`               | Total duration; `None` = run until stopped  |
 | `stop_condition`   | `callable` or `None`| `None`               | `(data_dict) -> bool`; return `True` to stop|
+| `chunk_size`       | `int`               | `256`                | Samples buffered in memory before flushing to disk. Smaller = safer on crash, more I/O. |
 | `tags`             | `list[str]`         | `[]`                 | Free-form tags                              |
 | `metadata`         | `dict`              | `{}`                 | Additional metadata                         |
 | `before_experiment`| `callable` or `None`| `None`               | Hook `()`: once before start                |
 | `after_experiment` | `callable` or `None`| `None`               | Hook `()`: once after finish                |
 | `after_point`      | `callable` or `None`| `None`               | Hook `(sample_index, data_dict)`: after each read |
 
-Data is saved via zarro's `StreamingWriter` with a `_time` timestamp array.
+Data is saved via zarro's `StreamingWriter` with a `_time` timestamp array. Samples are buffered
+in memory and flushed to disk in batches of `chunk_size` to minimise I/O overhead. A final flush
+happens on `close()`, so no data is lost on normal exit or `Ctrl+C`.
+
+---
+
+### EventLineConfig
+
+```python
+from orchid import EventLineConfig
+```
+
+Visual properties for parameter-change event markers drawn on time-series plots.
+
+| Argument    | Type  | Default                   | Description                                                      |
+|-------------|-------|---------------------------|------------------------------------------------------------------|
+| `color`     | `str` | `"rgba(255,80,80,0.7)"`   | Line and label color. Any CSS/plotly color string.               |
+| `width`     | `int` | `1`                       | Line width in pixels.                                            |
+| `dash`      | `str` | `"dash"`                  | Line style: `"solid"`, `"dot"`, `"dash"`, `"longdash"`, `"dashdot"`. |
+| `font_size` | `int` | `9`                       | Label font size in points.                                       |
+
+```python
+plotter = LivePlotter(
+    [PlotSpec(x="_time", y="lockin_X")],
+    event_line=EventLineConfig(
+        color="rgba(0,150,255,0.8)",
+        width=2,
+        dash="dot",
+        font_size=11,
+    ),
+)
+```
 
 ---
 
@@ -1327,7 +1435,7 @@ Describes one subplot in a `LivePlotter`.
 
 | Argument      | Type               | Default   | Description                                      |
 |---------------|--------------------|-----------|--------------------------------------------------|
-| `x`           | `str`              | required  | Line: x-axis param. Heatmap: x-axis sweep param. Monitor: `"_time"`. |
+| `x`           | `str`              | required  | Line: sweep parameter name **or readout name** for x-axis. Heatmap: x-axis sweep param. Monitor: `"_time"` or readout name. |
 | `y`           | `str`              | required  | Line: readout name (y-axis). Heatmap: y-axis sweep param. |
 | `z`           | `str` or `None`    | `None`    | Heatmap only: readout name for color values. Required for heatmaps. |
 | `plot_type`   | `str`              | `"auto"`  | `"line"`, `"heatmap"`, or `"auto"` (infer from ndim) |
@@ -1344,18 +1452,19 @@ from orchid import LivePlotter
 
 Live plotting via a Dash server in a separate browser window.
 
-| Argument          | Type              | Default | Description                          |
-|-------------------|-------------------|---------|--------------------------------------|
-| `plots`           | `list[PlotSpec]`  | required| Subplot specifications               |
-| `port`            | `int`             | `8050`  | Dash server port                     |
-| `height`          | `int`             | `350`   | Height in pixels per subplot         |
-| `width`           | `int`             | `700`   | Figure width in pixels               |
-| `open_browser`    | `bool`            | `True`  | Auto-open browser on start           |
-| `update_interval` | `int`             | `500`   | Dash polling interval in ms          |
+| Argument          | Type                       | Default              | Description                          |
+|-------------------|----------------------------|----------------------|--------------------------------------|
+| `plots`           | `list[PlotSpec]`           | required             | Subplot specifications               |
+| `port`            | `int`                      | `8050`               | Dash server port                     |
+| `height`          | `int`                      | `350`                | Height in pixels per subplot         |
+| `width`           | `int`                      | `700`                | Figure width in pixels               |
+| `open_browser`    | `bool`                     | `True`               | Auto-open browser on start           |
+| `update_interval` | `int`                      | `500`                | Dash polling interval in ms          |
+| `event_line`      | `EventLineConfig` or `None`| `EventLineConfig()`  | Style for parameter-change markers   |
 
 #### Lifecycle methods (called by the runner)
 
-| Method                                    | When called                      |
+| Method / Property                         | Description                      |
 |-------------------------------------------|----------------------------------|
 | `setup(proc)`                             | Before experiment — resets state, stops previous server, creates figure, starts new Dash server |
 | `update_point(index, data, sweep_values)` | After every measurement point    |
@@ -1364,6 +1473,7 @@ Live plotting via a Dash server in a separate browser window.
 | `update_monitor(sample_idx, data, timestamp)` | After each append (monitors). `x="_time"` auto-scales to s/min/hr from zero. |
 | `finalize()`                              | After experiment — stops refreshing (zoom/pan preserved) |
 | `stop()`                                  | Shut down the Dash server and free the port |
+| `is_running` *(property)*                 | `True` if the Dash server is currently running |
 
 Each subplot only refreshes when the event matches its `update_every` setting. For example, a `PlotSpec` with `update_every="point"` will update on `update_point()` calls but ignore `update_sweep()` and `update_plane()` calls.
 
@@ -1440,23 +1550,25 @@ Executes procedures and manages data flow to zarro. Internally delegates sweep e
 
 #### Methods
 
-| Method                                  | Description                              |
+| Method / Property                       | Description                              |
 |-----------------------------------------|------------------------------------------|
-| `run(procedure, plotter=None) -> Path`  | Run sweep experiment (sync)              |
-| `await arun(procedure, plotter=None) -> Path` | Run sweep experiment (async)        |
-| `run_monitor(procedure, plotter=None, background=False) -> Path` | Run time-series monitor |
+| `run(procedure, plotter=None, return_path=False) -> Path or None`  | Run sweep experiment (sync)   |
+| `await arun(procedure, plotter=None) -> Path` | Run sweep experiment (async)               |
+| `run_monitor(procedure, plotter=None, background=False, return_path=False) -> Path or None` | Run time-series monitor |
 | `await arun_monitor(procedure, plotter=None) -> Path` | Run monitor (async)       |
-| `stop_monitor() -> Path`               | Stop a background monitor and return data path |
+| `stop_monitor() -> Path`                | Stop a background monitor and return data path |
+| `is_monitoring` *(property)*            | `True` if a background monitor is currently running |
 
 All methods return the `Path` to the output data directory.
 
 **`run_monitor` parameters:**
 
-| Argument     | Type   | Default | Description                                    |
-|--------------|--------|---------|------------------------------------------------|
-| `procedure`  | `MonitorProcedure` | required | The monitoring procedure         |
-| `plotter`    | `LivePlotter` or `None` | `None` | Live plotter                   |
-| `background` | `bool` | `False` | If True, run in background thread and return immediately. Use `ctx["Vgt"] = 0.5` to change parameters, `runner.stop_monitor()` to stop. |
+| Argument      | Type   | Default | Description                                    |
+|---------------|--------|---------|------------------------------------------------|
+| `procedure`   | `MonitorProcedure` | required | The monitoring procedure        |
+| `plotter`     | `LivePlotter` or `None` | `None` | Live plotter                  |
+| `background`  | `bool` | `False` | If True, run in background thread and return immediately. Use `ctx["Vgt"] = 0.5` to change parameters, `runner.stop_monitor()` to stop. |
+| `return_path` | `bool` | `False` | If True, return the `Path` to the saved data directory. Default is False (returns `None`). In background mode, always returns `None`; use `stop_monitor()` to get the path. |
 
 **Interrupt handling:** `Ctrl+C` cleanly stops any running experiment, saves collected data with `status: "interrupted"` in metadata, and prints a single-line message. No tracebacks in Jupyter.
 
@@ -1501,7 +1613,17 @@ loop:
 ### Utility Functions
 
 ```python
-from orchid import update_metadata, read_metadata
+from orchid import update_metadata, read_metadata, read_events
+```
+
+**`read_events(data_dir) -> list[dict]`**
+
+Read parameter change events recorded during a monitor run. Returns a list of dicts with keys `time`, `elapsed`, `param`, `value`. Returns `[]` if no events were recorded or `events.yaml` does not exist.
+
+```python
+events = read_events("./data/0005")
+for e in events:
+    print(f"t={e['elapsed']:.1f}s  {e['param']} → {e['value']}")
 ```
 
 **`update_metadata(data_dir, **kwargs) -> dict`**

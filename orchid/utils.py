@@ -42,6 +42,31 @@ def update_metadata(data_dir: str | Path, **kwargs) -> dict:
     return meta
 
 
+def read_events(data_dir: str | Path) -> list[dict]:
+    """Read parameter change events recorded during a monitor run.
+
+    Returns a list of event dicts, each with keys:
+    ``time`` (Unix timestamp), ``elapsed`` (seconds from start),
+    ``param`` (parameter name), ``value`` (value that was set).
+    Returns an empty list if no events were recorded.
+
+    Parameters
+    ----------
+    data_dir : str or Path
+        Path to the experiment directory (containing events.yaml).
+
+    Examples
+    --------
+    >>> events = read_events("./data/0005")
+    >>> for e in events:
+    ...     print(f"t={e['elapsed']:.1f}s  {e['param']} → {e['value']}")
+    """
+    path = Path(data_dir) / "events.yaml"
+    if not path.exists():
+        return []
+    return yaml.safe_load(path.read_text()) or []
+
+
 def read_metadata(data_dir: str | Path) -> dict:
     """Read an experiment's metadata.yaml.
 
