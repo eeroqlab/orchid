@@ -29,6 +29,7 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [Custom Hooks](#custom-hooks)
   - [Mixed Readouts (Scalar + Trace)](#mixed-readouts-scalar--trace)
   - [Async Usage](#async-usage)
+  - [Inspecting a Procedure](#inspecting-a-procedure)
 - [API Reference](#api-reference)
   - [InstrumentAdapter](#instrumentadapter)
   - [Parameter](#parameter)
@@ -43,6 +44,7 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [WriteMode](#writemode)
   - [ErrorPolicy](#errorpolicy)
   - [ExperimentRunner](#experimentrunner)
+  - [Utility Functions](#utility-functions)
 - [Data Backend (zarro)](#data-backend-zarro)
 - [Architecture](#architecture)
 
@@ -529,6 +531,29 @@ ctx["Vgt"] = 0.5   # change parameters from the next cell
 data_dir = runner.stop_monitor()  # stop and get data path
 ```
 
+Before each experiment starts, the runner automatically prints a formatted summary of the procedure and saves a `procedure.yaml` to the data directory:
+
+```
+Experiment : gate_sweep
+Tags       : cooldown_3
+────────────────────────────────────────────────────
+Sweeps  2D · 5,000 points
+  [0] Vbias         -1.0 →  1.0       100 pts  V
+  [1] Vgt           -3.0 →  3.0        50 pts  V
+────────────────────────────────────────────────────
+Readouts
+  lockin_X           scalar   V
+  lockin_Y           scalar   V
+────────────────────────────────────────────────────
+Settings
+  write_mode    sweepwise
+  settle_time   10 ms
+  error_policy  stop_and_save
+  est. duration ~50 s
+```
+
+You can also call `proc.summary()` manually at any time before running.
+
 #### Interrupt handling
 
 Pressing `Ctrl+C` (or interrupting the Jupyter kernel) cleanly stops the experiment, saves all collected data with `status: "interrupted"` in the metadata, and prints a short message — no tracebacks:
@@ -653,6 +678,24 @@ meta = read_metadata("./data/0001")
 print(meta["sample"])     # "chip_A1"
 print(meta["status"])     # "completed"
 ```
+
+#### Reading procedure info
+
+Every run saves a `procedure.yaml` alongside `metadata.yaml`. Use `read_procedure()` to retrieve and display it:
+
+```python
+from orchid import read_procedure
+
+# Prints summary table and returns the dict
+d = read_procedure("./data/0001")
+
+# Just the dict, no print
+d = read_procedure("./data/0001", print_summary=False)
+print(d["total_points"])          # 5000
+print(d["settings"]["write_mode"])  # "sweepwise"
+```
+
+The dict structure mirrors what `proc.to_dict()` returns — full sweep ranges, readout specs, settings, estimated duration, and hook source code.
 
 #### Updating metadata after an experiment
 
@@ -1140,6 +1183,83 @@ data_dir = await runner.arun_monitor(monitor)
 
 Async instrument drivers are supported natively — if your get/set functions are `async def`, orchid will `await` them directly instead of wrapping in a thread.
 
+### Inspecting a Procedure
+
+#### Before running — print summary manually
+
+```python
+proc.summary()
+```
+
+```
+Experiment : gate_sweep
+Tags       : cooldown_3
+────────────────────────────────────────────────────
+Sweeps  2D · 5,000 points
+  [0] Vbias         -1.0 →  1.0       100 pts  V
+  [1] Vgt           -3.0 →  3.0        50 pts  V
+────────────────────────────────────────────────────
+Readouts
+  lockin_X           scalar   V
+  lockin_Y           scalar   V
+────────────────────────────────────────────────────
+Settings
+  write_mode    sweepwise
+  settle_time   10 ms
+  error_policy  stop_and_save
+  est. duration ~50 s
+────────────────────────────────────────────────────
+Hooks
+  after_point              auto_phase
+                           "Re-phases lockin every 10 rows."
+```
+
+The runner calls `proc.summary()` automatically before every run — the output appears above the progress bar.
+
+#### After running — read from data directory
+
+```python
+from orchid import read_procedure
+
+# Prints summary and returns dict
+d = read_procedure("./data/0042")
+
+# Access specific fields
+print(d["total_points"])                # 5000
+print(d["settings"]["settle_time"])     # 0.01
+print(d["sweeps"][0]["min"])            # -1.0
+print(d["hooks"]["after_point"]["doc"]) # "Re-phases lockin every 10 rows."
+```
+
+#### Hook source in procedure.yaml
+
+If a named function (not a lambda) is registered as a hook, its full source is captured:
+
+```yaml
+# procedure.yaml (excerpt)
+hooks:
+  after_point:
+    name: auto_phase
+    doc: Re-phases lockin every 10 rows.
+    source: |
+      def auto_phase(index):
+          """Re-phases lockin every 10 rows."""
+          if index[-1] == 0:
+              lockin.auto_phase()
+  before_experiment: null
+  after_experiment: null
+```
+
+Lambdas are noted but not serialised:
+
+```yaml
+  before_point:
+    name: "<lambda>"
+    note: "lambda — source not recorded"
+```
+
+Source extraction works for functions defined in `.py` files and in Jupyter notebook cells (IPython keeps cell source in memory). If source is unavailable, the function name and module are recorded as a fallback.
+
 ---
 
 ## API Reference
@@ -1332,6 +1452,59 @@ When `reverse=True`, the values array is doubled: `[forward, reversed]`.
 
 ---
 
+### MultiSweep
+
+```python
+from orchid import MultiSweep
+```
+
+Sweep multiple parameters simultaneously along a shared axis. All parameters step together at each point.
+
+| Argument     | Type                     | Default  | Description                                         |
+|--------------|--------------------------|----------|-----------------------------------------------------|
+| `parameters` | `list[Parameter or str]` | required | Parameters to sweep simultaneously                  |
+| `values`     | `list[array-like]`       | required | One values array per parameter, all the same length |
+| `reverse`    | `bool`                   | `False`  | Append reversed values (hysteresis) on all arrays   |
+
+```python
+proc = Procedure(
+    name="gate_pair_sweep",
+    context=ctx,
+    sweeps=[
+        MultiSweep(
+            parameters=["Vgt", "Vbg"],
+            values=[np.linspace(0, 1, 100), np.linspace(0, 5, 100)],
+        )
+    ],
+    readouts=["lockin_X"],
+)
+# At point i: Vgt = linspace(0,1,100)[i]  AND  Vbg = linspace(0,5,100)[i]
+# Result shape: lockin_X -> (100,)
+```
+
+Can be freely mixed with regular `Sweep` in the same procedure:
+
+```python
+proc = Procedure(
+    sweeps=[
+        Sweep("power", np.linspace(-30, 0, 20)),           # outer: slow axis
+        MultiSweep(["Vgt", "Vbg"], [vgt_vals, vbg_vals]),  # inner: fast axis
+    ],
+    ...
+)
+# Result shape: lockin_X -> (20, 100)
+```
+
+| Property    | Description                                    |
+|-------------|------------------------------------------------|
+| `values`    | First parameter's values array (for iteration) |
+| `all_values`| List of all parameters' value arrays           |
+| `length`    | Number of points                               |
+| `name`      | Combined name, e.g. `"Vgt+Vbg"`               |
+| `parameter` | First parameter (for axis labelling)           |
+
+---
+
 ### Procedure
 
 ```python
@@ -1340,30 +1513,35 @@ from orchid import Procedure
 
 Experiment procedure for sweep-based measurements.
 
-| Argument           | Type                | Default              | Description                                 |
-|--------------------|---------------------|----------------------|---------------------------------------------|
-| `name`             | `str`               | required             | Experiment name                             |
-| `context`          | `ExperimentContext`  | required             | Lab bench configuration                     |
-| `sweeps`           | `list[Sweep]`       | `[]`                 | Sweep axes (outer-first ordering)           |
-| `readouts`         | `list[str]`         | `[]`                 | Readout names to record                     |
-| `settle_time`      | `float`             | `0.0`                | Seconds to wait after set, before read      |
-| `snake`            | `bool`              | `False`              | Alternate inner sweep direction             |
-| `write_mode`       | `WriteMode`         | `POINTWISE`          | When to flush data to disk                  |
-| `error_policy`     | `ErrorPolicy`       | `STOP_AND_SAVE`      | How to handle measurement errors            |
-| `max_retries`      | `int`               | `3`                  | Retries for `RETRY_AND_SKIP` policy         |
-| `tags`             | `list[str]`         | `[]`                 | Free-form tags for metadata                 |
-| `metadata`         | `dict`              | `{}`                 | Additional metadata to save                 |
-| `before_experiment`| `callable` or `None`| `None`               | Hook `()`: once before start                |
-| `after_experiment` | `callable` or `None`| `None`               | Hook `()`: once after finish                |
-| `before_point`     | `callable` or `None`| `None`               | Hook `(index_tuple)`: before each measurement |
-| `after_point`      | `callable` or `None`| `None`               | Hook `(index_tuple)`: after each measurement  |
-| `before_sweep`     | `callable` or `None`| `None`               | Hook `(axis_index)`: before each sweep axis   |
-| `after_sweep`      | `callable` or `None`| `None`               | Hook `(axis_index)`: after each sweep axis    |
+| Argument           | Type                        | Default              | Description                                 |
+|--------------------|-----------------------------|----------------------|---------------------------------------------|
+| `name`             | `str`                       | required             | Experiment name                             |
+| `context`          | `ExperimentContext`          | required             | Lab bench configuration                     |
+| `sweeps`           | `list[Sweep or MultiSweep]` | `[]`                 | Sweep axes (outer-first ordering)           |
+| `readouts`         | `list[str]`                 | `[]`                 | Readout names to record                     |
+| `settle_time`      | `float`                     | `0.0`                | Seconds to wait after set, before read      |
+| `snake`            | `bool`                      | `False`              | Alternate inner sweep direction             |
+| `write_mode`       | `WriteMode`                 | `POINTWISE`          | When to flush data to disk                  |
+| `error_policy`     | `ErrorPolicy`               | `STOP_AND_SAVE`      | How to handle measurement errors            |
+| `max_retries`      | `int`                       | `3`                  | Retries for `RETRY_AND_SKIP` policy         |
+| `tags`             | `list[str]`                 | `[]`                 | Free-form tags for metadata                 |
+| `metadata`         | `dict`                      | `{}`                 | Additional metadata to save                 |
+| `before_experiment`| `callable` or `None`        | `None`               | Hook `()`: once before start                |
+| `after_experiment` | `callable` or `None`        | `None`               | Hook `()`: once after finish                |
+| `before_point`     | `callable` or `None`        | `None`               | Hook `(index_tuple)`: before each measurement |
+| `after_point`      | `callable` or `None`        | `None`               | Hook `(index_tuple)`: after each measurement  |
+| `before_sweep`     | `callable` or `None`        | `None`               | Hook `(axis_index)`: before each sweep axis   |
+| `after_sweep`      | `callable` or `None`        | `None`               | Hook `(axis_index)`: after each sweep axis    |
 
 | Property  | Type            | Description                    |
 |-----------|-----------------|--------------------------------|
 | `ndim`    | `int`           | Number of sweep axes           |
 | `shape`   | `tuple[int,...]`| Sweep grid shape               |
+
+| Method        | Description                                                                          |
+|---------------|--------------------------------------------------------------------------------------|
+| `summary()`   | Print a formatted table of sweeps, readouts, settings, and hooks. Called automatically by the runner before each experiment. |
+| `to_dict()`   | Serialize to a plain dict. Saved as `procedure.yaml` in the data directory. Read back with `read_procedure()`. |
 
 ---
 
@@ -1393,6 +1571,11 @@ Time-series monitoring procedure (no sweeps).
 Data is saved via zarro's `StreamingWriter` with a `_time` timestamp array. Samples are buffered
 in memory and flushed to disk in batches of `chunk_size` to minimise I/O overhead. A final flush
 happens on `close()`, so no data is lost on normal exit or `Ctrl+C`.
+
+| Method        | Description                                                                          |
+|---------------|--------------------------------------------------------------------------------------|
+| `summary()`   | Print a formatted table of readouts, settings, and hooks. Called automatically by the runner before each monitor run. |
+| `to_dict()`   | Serialize to a plain dict. Saved as `procedure.yaml` in the data directory. Read back with `read_procedure()`. |
 
 ---
 
@@ -1466,18 +1649,18 @@ Live plotting via a Dash server in a separate browser window.
 
 | Method / Property                         | Description                      |
 |-------------------------------------------|----------------------------------|
-| `setup(proc)`                             | Before experiment — resets state, stops previous server, creates figure, starts new Dash server |
+| `setup(proc)`                             | Before experiment — resets figure state (server kept alive if already running), creates new figure dict |
 | `update_point(index, data, sweep_values)` | After every measurement point    |
 | `update_sweep(outer_index, data, sweep_values)` | After each inner sweep completes |
 | `update_plane(outer_index, data, sweep_values)` | After each 2D plane completes |
 | `update_monitor(sample_idx, data, timestamp)` | After each append (monitors). `x="_time"` auto-scales to s/min/hr from zero. |
-| `finalize()`                              | After experiment — stops refreshing (zoom/pan preserved) |
-| `stop()`                                  | Shut down the Dash server and free the port |
+| `notify_event(timestamp, param, value)`   | Draw a vertical event line on all `x="_time"` subplots. Called automatically by the runner. |
+| `stop()`                                  | Stop refreshing and shut down the Dash server, freeing the port. Called automatically by the runner after each experiment. |
 | `is_running` *(property)*                 | `True` if the Dash server is currently running |
 
 Each subplot only refreshes when the event matches its `update_every` setting. For example, a `PlotSpec` with `update_every="point"` will update on `update_point()` calls but ignore `update_sweep()` and `update_plane()` calls.
 
-**Reusable:** A `LivePlotter` can be reused across experiments — `setup()` automatically stops the old server and resets all state.
+**Reusable across experiments:** `setup()` resets all figure state but keeps the Dash server alive, so the browser reconnects seamlessly without a page reload. `stop()` is called automatically by the runner after each experiment completes or is interrupted; call it manually to free the port entirely.
 
 #### Time axis formatting
 
@@ -1613,8 +1796,32 @@ loop:
 ### Utility Functions
 
 ```python
-from orchid import update_metadata, read_metadata, read_events
+from orchid import read_events, read_metadata, read_procedure, update_metadata
 ```
+
+**`read_procedure(data_dir, print_summary=True) -> dict`**
+
+Read `procedure.yaml` from an experiment directory. By default also prints the same formatted summary table that was shown before the experiment ran.
+
+```python
+d = read_procedure("./data/0042")              # prints summary + returns dict
+d = read_procedure("./data/0042", print_summary=False)  # silent
+
+# Useful fields
+d["kind"]                        # "sweep" or "monitor"
+d["name"]                        # procedure name
+d["total_points"]                # e.g. 5000
+d["shape"]                       # e.g. [100, 50]
+d["settings"]["write_mode"]      # e.g. "sweepwise"
+d["settings"]["settle_time"]     # in seconds
+d["estimated_duration_s"]        # lower-bound estimate
+d["sweeps"][0]["parameter"]      # first sweep's parameter name
+d["sweeps"][0]["min"]            # sweep start value
+d["sweeps"][0]["max"]            # sweep end value
+d["hooks"]["after_point"]        # None, or dict with "name", "doc", "source"
+```
+
+For a `MonitorProcedure` the dict contains `kind="monitor"`, `settings["interval"]`, `settings["duration"]`, `settings["chunk_size"]`, and no `sweeps` key.
 
 **`read_events(data_dir) -> list[dict]`**
 
@@ -1665,7 +1872,9 @@ data/0001/
     Vgt/              # control values
     lockin_X/         # measurement data
     S21/              # trace data
-  metadata.yaml       # human-readable metadata
+  metadata.yaml       # status, date, schema, tags, user metadata
+  procedure.yaml      # full procedure spec: sweeps, readouts, settings, hook source
+  events.yaml         # parameter changes during monitor runs (only if any occurred)
 ```
 
 **Metadata includes:** date (ISO 8601), schema, tags, and all user metadata from both the context and the procedure.

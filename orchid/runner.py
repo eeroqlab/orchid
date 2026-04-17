@@ -9,9 +9,10 @@ import time
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from .parameter import DataKind
-from .procedure import ErrorPolicy, MonitorProcedure, Procedure, WriteMode
+from .procedure import ErrorPolicy, MonitorProcedure, MultiSweep, Procedure, WriteMode
 
 # Zarro imports — use absolute import from the sibling package
 from zarro import (
@@ -72,12 +73,19 @@ def _build_schema(proc: Procedure) -> MeasurementSchema:
     """Build a zarro MeasurementSchema from a Procedure."""
     control_axes = []
     for sweep in proc.sweeps:
-        cv = ControlVar(
-            name=sweep.parameter.name,
-            values=sweep.values,
-            unit=sweep.parameter.unit,
-        )
-        control_axes.append(AxisSpecs([cv]))
+        if isinstance(sweep, MultiSweep):
+            cvs = [
+                ControlVar(name=p.name, values=v, unit=p.unit)
+                for p, v in zip(sweep.parameters, sweep.all_values)
+            ]
+            control_axes.append(AxisSpecs(cvs))
+        else:
+            cv = ControlVar(
+                name=sweep.parameter.name,
+                values=sweep.values,
+                unit=sweep.parameter.unit,
+            )
+            control_axes.append(AxisSpecs([cv]))
 
     readout_specs = []
     for rname in proc.readouts:
@@ -123,6 +131,11 @@ class WriteStrategy(abc.ABC):
         self.writer = writer
         self.pbar = pbar
         self.plotter = plotter
+        # Track the last-set index and reversal flag per axis so that
+        # _sweep_current_values() can read values from arrays instead of
+        # querying instruments (which may be slow GPIB/USB round-trips).
+        self._current_indices: dict[int, int] = {}
+        self._current_reversed_map: dict[int, bool] = {}
 
     @abc.abstractmethod
     async def execute(self) -> None:
@@ -131,11 +144,51 @@ class WriteStrategy(abc.ABC):
     # ── Shared helpers ────────────────────────────────────────────────
 
     def _maybe_snake(self, sweep, axis, index):
-        """Return sweep values, reversed if snake scan on odd parent."""
-        values = sweep.values
+        """Return primary sweep values, reversed if snake scan on odd parent."""
+        values = sweep.values  # works for both Sweep and MultiSweep (.values = first array)
         if self.proc.snake and axis > 0 and len(index) > 0 and index[-1] % 2 == 1:
             values = values[::-1]
         return values
+
+    def _is_reversed(self, axis: int, index: tuple) -> bool:
+        """True if snake scan reversal applies at this axis/index."""
+        return self.proc.snake and axis > 0 and len(index) > 0 and index[-1] % 2 == 1
+
+    async def _aset_sweep_point(self, axis: int, sweep, i: int, reversed_: bool = False) -> None:
+        """Set all parameters of a sweep to their i-th values.
+
+        Also records (axis, i, reversed_) so that _sweep_current_values()
+        can look up the current value from the array without re-querying
+        the instrument.
+        """
+        self._current_indices[axis] = i
+        self._current_reversed_map[axis] = reversed_
+        if isinstance(sweep, MultiSweep):
+            for param, vals in zip(sweep.parameters, sweep.all_values):
+                actual = vals[::-1] if reversed_ else vals
+                await param.aset(actual[i])
+        else:
+            vals = sweep.values[::-1] if reversed_ else sweep.values
+            await sweep.parameter.aset(vals[i])
+
+    def _sweep_current_values(self) -> dict:
+        """Return {param_name: current_value} for all sweep parameters.
+
+        Reads from the in-memory value arrays using the last-recorded
+        indices — no instrument round-trips.
+        """
+        result = {}
+        for axis, sweep in enumerate(self.proc.sweeps):
+            i = self._current_indices.get(axis, 0)
+            rev = self._current_reversed_map.get(axis, False)
+            if isinstance(sweep, MultiSweep):
+                for param, vals in zip(sweep.parameters, sweep.all_values):
+                    actual = vals[::-1] if rev else vals
+                    result[param.name] = float(actual[i])
+            else:
+                vals = sweep.values[::-1] if rev else sweep.values
+                result[sweep.parameter.name] = float(vals[i])
+        return result
 
     async def _safe_read(self, readout):
         """Read a readout with error handling per the procedure's policy."""
@@ -159,9 +212,7 @@ class WriteStrategy(abc.ABC):
 
     def _nan_value(self, readout):
         """Return a NaN-filled value matching the readout shape."""
-        if readout.kind == DataKind.SCALAR:
-            return np.nan
-        return np.full(readout.shape, np.nan, dtype=np.float32)
+        return _nan_for_readout(readout)
 
     def _allocate_buffers(self, shape: tuple[int, ...]) -> dict[str, np.ndarray]:
         """Pre-allocate numpy buffers for all readouts."""
@@ -191,29 +242,25 @@ class WriteStrategy(abc.ABC):
         """Notify the plotter after a single measurement point."""
         if self.plotter is None:
             return
-        sweep_values = {}
-        for sweep in self.proc.sweeps:
-            sweep_values[sweep.parameter.name] = sweep.parameter.get()
-        self.plotter.update_point(index, data, sweep_values)
+        self.plotter.update_point(index, data, self._sweep_current_values())
 
     def _notify_plotter_sweep(self, outer_index, buffers, inner_sweep):
         """Notify the plotter after a full inner sweep completes."""
         if self.plotter is None:
             return
-        sweep_values = {}
-        for sweep in self.proc.sweeps:
-            sweep_values[sweep.parameter.name] = sweep.parameter.get()
-        sweep_values[inner_sweep.parameter.name] = inner_sweep.values
+        sweep_values = self._sweep_current_values()
+        if isinstance(inner_sweep, MultiSweep):
+            for param, vals in zip(inner_sweep.parameters, inner_sweep.all_values):
+                sweep_values[param.name] = vals
+        else:
+            sweep_values[inner_sweep.parameter.name] = inner_sweep.values
         self.plotter.update_sweep(outer_index, buffers, sweep_values)
 
     def _notify_plotter_plane(self, outer_index, buffers):
         """Notify the plotter after a full 2D plane completes."""
         if self.plotter is None:
             return
-        sweep_values = {}
-        for sweep in self.proc.sweeps:
-            sweep_values[sweep.parameter.name] = sweep.parameter.get()
-        self.plotter.update_plane(outer_index, buffers, sweep_values)
+        self.plotter.update_plane(outer_index, buffers, self._sweep_current_values())
 
     async def _outer_loop(self, axis, index, on_leaf):
         """Generic recursive loop through outer sweep axes.
@@ -221,11 +268,12 @@ class WriteStrategy(abc.ABC):
         Calls ``on_leaf(index)`` when reaching ``leaf_axis``.
         """
         sweep = self.proc.sweeps[axis]
-        values = self._maybe_snake(sweep, axis, index)
+        n = len(self._maybe_snake(sweep, axis, index))
+        reversed_ = self._is_reversed(axis, index)
 
         await _acall_hook(self.proc.before_sweep, axis)
-        for i, val in enumerate(values):
-            await sweep.parameter.aset(val)
+        for i in range(n):
+            await self._aset_sweep_point(axis, sweep, i, reversed_)
             await on_leaf(axis + 1, index + (i,))
         await _acall_hook(self.proc.after_sweep, axis)
 
@@ -278,15 +326,16 @@ class SweepwiseStrategy(WriteStrategy):
         """Sweep innermost axis, buffer all points, write_trace."""
         inner_axis = self.proc.ndim - 1
         sweep = self.proc.sweeps[inner_axis]
-        values = self._maybe_snake(sweep, inner_axis, outer_index)
+        n = len(self._maybe_snake(sweep, inner_axis, outer_index))
+        reversed_ = self._is_reversed(inner_axis, outer_index)
 
         buffers = self._allocate_buffers((sweep.length,))
 
         await _acall_hook(self.proc.before_sweep, inner_axis)
 
-        for i, val in enumerate(values):
+        for i in range(n):
             full_index = outer_index + (i,)
-            await sweep.parameter.aset(val)
+            await self._aset_sweep_point(inner_axis, sweep, i, reversed_)
 
             await _acall_hook(self.proc.before_point, full_index)
             if self.proc.settle_time > 0:
@@ -338,15 +387,19 @@ class PlanewiseStrategy(WriteStrategy):
 
         await _acall_hook(self.proc.before_sweep, axis_row)
 
-        for i, val_row in enumerate(self._maybe_snake(sweep_row, axis_row, outer_index)):
-            await sweep_row.parameter.aset(val_row)
+        n_rows = len(self._maybe_snake(sweep_row, axis_row, outer_index))
+        reversed_row = self._is_reversed(axis_row, outer_index)
+
+        for i in range(n_rows):
+            await self._aset_sweep_point(axis_row, sweep_row, i, reversed_row)
 
             await _acall_hook(self.proc.before_sweep, axis_col)
 
-            col_values = self._maybe_snake(sweep_col, axis_col, outer_index + (i,))
-            for j, val_col in enumerate(col_values):
+            n_cols = len(self._maybe_snake(sweep_col, axis_col, outer_index + (i,)))
+            reversed_col = self._is_reversed(axis_col, outer_index + (i,))
+            for j in range(n_cols):
                 full_index = outer_index + (i, j)
-                await sweep_col.parameter.aset(val_col)
+                await self._aset_sweep_point(axis_col, sweep_col, j, reversed_col)
 
                 await _acall_hook(self.proc.before_point, full_index)
                 if self.proc.settle_time > 0:
@@ -406,13 +459,21 @@ class AllStrategy(WriteStrategy):
             return
 
         sweep = self.proc.sweeps[axis]
-        values = self._maybe_snake(sweep, axis, index)
+        n = len(self._maybe_snake(sweep, axis, index))
+        reversed_ = self._is_reversed(axis, index)
 
         await _acall_hook(self.proc.before_sweep, axis)
-        for i, val in enumerate(values):
-            await sweep.parameter.aset(val)
+        for i in range(n):
+            await self._aset_sweep_point(axis, sweep, i, reversed_)
             await self._loop(buffers, axis + 1, index + (i,))
         await _acall_hook(self.proc.after_sweep, axis)
+
+
+def _nan_for_readout(readout) -> float | np.ndarray:
+    """Return a NaN-filled value matching the readout's kind and shape."""
+    if readout.kind == DataKind.SCALAR:
+        return np.nan
+    return np.full(readout.shape, np.nan, dtype=np.float32)
 
 
 _STRATEGY_MAP: dict[WriteMode, type[WriteStrategy]] = {
@@ -453,6 +514,7 @@ class ExperimentRunner:
         return root / proc.name
 
     def run(self, procedure: Procedure, plotter=None,
+            print_summary: bool = False,
             return_path: bool = False) -> Path | None:
         """Run a sweep experiment synchronously.
 
@@ -467,6 +529,9 @@ class ExperimentRunner:
             The experiment procedure to run.
         plotter : LivePlotter, optional
             Live plotter for real-time visualization.
+        print_summary : bool
+            If True, print the procedure summary table before running.
+            Default is False.
         return_path : bool
             If True, return the Path to the saved data directory.
             Default is False (returns None).
@@ -483,7 +548,8 @@ class ExperimentRunner:
             "proc": procedure, "plotter": plotter,
         }
         try:
-            result = _run_coro(self.arun(procedure, plotter=plotter))
+            result = _run_coro(self.arun(procedure, plotter=plotter,
+                                         print_summary=print_summary))
         except (KeyboardInterrupt, asyncio.CancelledError):
             result = self._handle_interrupt()
 
@@ -514,12 +580,16 @@ class ExperimentRunner:
             print(f"\nExperiment '{name}' interrupted.")
         return data_dir
 
-    async def arun(self, proc: Procedure, plotter=None) -> Path:
+    async def arun(self, proc: Procedure, plotter=None,
+                   print_summary: bool = False) -> Path:
         """Run a sweep experiment asynchronously."""
         try:
             from tqdm import tqdm
         except ImportError:
             tqdm = None
+
+        if print_summary:
+            proc.summary()
 
         data_dir = self._get_data_dir(proc)
         schema = _build_schema(proc)
@@ -529,6 +599,10 @@ class ExperimentRunner:
             tags=proc.tags,
             overwrite=False,
             initialize_arrays=True,
+        )
+
+        (data_dir / "procedure.yaml").write_text(
+            yaml.safe_dump(proc.to_dict(), sort_keys=False, allow_unicode=True)
         )
 
         if plotter is not None:
@@ -583,6 +657,7 @@ class ExperimentRunner:
 
     def run_monitor(self, procedure: MonitorProcedure, plotter=None,
                      background: bool = False,
+                     print_summary: bool = False,
                      return_path: bool = False) -> Path | None:
         """Run time-series monitoring.
 
@@ -596,6 +671,9 @@ class ExperimentRunner:
             If True, run in a background thread and return immediately.
             Use ``ctx["Vgt"] = 0.5`` in the next cell to change parameters
             while monitoring. Call ``runner.stop_monitor()`` to stop.
+        print_summary : bool
+            If True, print the procedure summary table before running.
+            Default is False.
         return_path : bool
             If True, return the Path to the saved data directory.
             Default is False (returns None).
@@ -616,7 +694,8 @@ class ExperimentRunner:
             "proc": procedure, "plotter": plotter,
         }
         try:
-            result = _run_coro(self.arun_monitor(procedure, plotter=plotter))
+            result = _run_coro(self.arun_monitor(procedure, plotter=plotter,
+                                                  print_summary=print_summary))
         except (KeyboardInterrupt, asyncio.CancelledError):
             result = self._handle_interrupt()
 
@@ -670,8 +749,12 @@ class ExperimentRunner:
             print(f"Monitor stopped. Data saved to: {result}")
         return result
 
-    async def arun_monitor(self, proc: MonitorProcedure, plotter=None) -> Path:
+    async def arun_monitor(self, proc: MonitorProcedure, plotter=None,
+                           print_summary: bool = False) -> Path:
         """Run time-series monitoring asynchronously."""
+        if print_summary:
+            proc.summary()
+
         data_dir = self._get_data_dir(proc)
 
         readout_shapes = {}
@@ -688,6 +771,10 @@ class ExperimentRunner:
             chunk_size=proc.chunk_size,
             overwrite=False,
             tags=proc.tags,
+        )
+
+        (data_dir / "procedure.yaml").write_text(
+            yaml.safe_dump(proc.to_dict(), sort_keys=False, allow_unicode=True)
         )
 
         if plotter is not None:
@@ -722,11 +809,16 @@ class ExperimentRunner:
                     if elapsed >= proc.duration:
                         break
 
-                # Read all readouts
+                # Read all readouts — errors are caught per-readout so a single
+                # instrument hiccup doesn't abort a long-running monitor session.
                 data = {}
                 for rname in proc.readouts:
                     readout = proc.context.readouts[rname]
-                    data[rname] = await readout.aread()
+                    try:
+                        data[rname] = await readout.aread()
+                    except Exception as e:
+                        print(f"  Warning: read error for '{rname}' at sample {sample_idx}: {e}")
+                        data[rname] = _nan_for_readout(readout)
 
                 timestamp = time.time()
                 writer.append(data, timestamp=timestamp)
@@ -759,11 +851,10 @@ class ExperimentRunner:
 
         # Write events.yaml if any parameter changes were recorded
         if event_log:
-            import yaml as _yaml
             for entry in event_log:
                 entry["elapsed"] = round(entry["time"] - start_time, 3)
             (data_dir / "events.yaml").write_text(
-                _yaml.safe_dump(event_log, sort_keys=True, allow_unicode=True)
+                yaml.safe_dump(event_log, sort_keys=True, allow_unicode=True)
             )
 
         await _acall_hook(proc.after_experiment)

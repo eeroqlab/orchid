@@ -241,19 +241,34 @@ class ExperimentContext:
         self._event_callback = None
         return log
 
-    def snapshot(self, names: list[str] | None = None) -> None:
+    def snapshot(
+        self,
+        names: list[str] | None = None,
+        *,
+        include_readouts: bool = False,
+    ) -> None:
         """Print a table of current parameter and readout values.
+
+        By default only parameters are read — readouts can involve slow
+        instrument acquisitions (lock-in time constants, VNA sweeps, etc.)
+        and are excluded unless explicitly requested.
 
         Parameters
         ----------
         names : list of str, optional
-            If given, only print these parameters/readouts.
-            If None, print all.
+            If given, read exactly these parameters/readouts (by name).
+            If None, read all parameters and, if ``include_readouts=True``,
+            all readouts too.
+        include_readouts : bool
+            If True, include all registered readouts when ``names`` is None.
+            Ignored when an explicit ``names`` list is supplied.
         """
         from tabulate import tabulate as _tabulate
 
         if names is None:
-            names = list(self.parameters.keys()) + list(self.readouts.keys())
+            names = list(self.parameters.keys())
+            if include_readouts:
+                names += list(self.readouts.keys())
 
         rows = []
         for name in names:

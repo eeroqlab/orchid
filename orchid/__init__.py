@@ -3,10 +3,10 @@
 from .instrument import InstrumentAdapter
 from .parameter import DataKind, Parameter, Readout
 from .context import ExperimentContext
-from .procedure import ErrorPolicy, MonitorProcedure, Procedure, Sweep, WriteMode
+from .procedure import ErrorPolicy, MonitorProcedure, MultiSweep, Procedure, Sweep, WriteMode
 from .runner import ExperimentRunner
 from .plotting import EventLineConfig, LivePlotter, PlotSpec
-from .utils import read_events, read_metadata, update_metadata
+from .utils import read_events, read_metadata, read_procedure, update_metadata
 
 __all__ = [
     "InstrumentAdapter",
@@ -16,6 +16,7 @@ __all__ = [
     "ExperimentContext",
     "ErrorPolicy",
     "MonitorProcedure",
+    "MultiSweep",
     "Procedure",
     "Sweep",
     "WriteMode",
@@ -25,5 +26,6 @@ __all__ = [
     "PlotSpec",
     "read_events",
     "read_metadata",
+    "read_procedure",
     "update_metadata",
 ]

@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import yaml
+
+# 1. Define bold escape sequences
+BOLD = "\033[1m"
+RESET = "\033[0m"
+SPACES = "\x20\x20\x20\x20"
 
 
 def update_metadata(data_dir: str | Path, **kwargs) -> dict:
@@ -65,6 +69,159 @@ def read_events(data_dir: str | Path) -> list[dict]:
     if not path.exists():
         return []
     return yaml.safe_load(path.read_text()) or []
+
+
+def _format_duration(seconds: float) -> str:
+    """Format a duration in seconds to a human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.4g} s"
+    elif seconds < 3600:
+        return f"{seconds / 60:.4g} min"
+    else:
+        return f"{seconds / 3600:.4g} hr"
+
+
+def _format_procedure_summary(d: dict) -> str:
+    """Format a procedure dict (from Procedure.to_dict()) as a plain-text table.
+
+    Uses a fixed 4-column layout — (identifier, value, meta, unit) — populated
+    from the dict and rendered in a single tabulate call so all columns are
+    globally aligned. Blank sentinel rows are post-processed into ─ separators.
+    """
+    from tabulate import tabulate as _tabulate
+
+    kind = d.get("kind", "sweep")
+    sweeps = d.get("sweeps", [])
+    readouts = d.get("readouts", [])
+    hooks = d.get("hooks", {})
+    active_hooks = {k: v for k, v in hooks.items() if v is not None}
+
+    BLANK = ("", "", "", "")
+    rows: list[tuple] = []
+    bold_indices: set[int] = set()  # row indices that should be bold in the output
+
+    def _header(label: str) -> None:
+        """Append a bold section-header row and record its index."""
+        bold_indices.add(len(rows))
+        rows.append((label, "", "", ""))
+
+    # ── Header ────────────────────────────────────────────
+    rows.append(("Experiment" if kind == "sweep" else "Monitor", d["name"], "", ""))
+    tags = d.get("tags") or []
+    if tags:
+        rows.append(("Tags", ", ".join(tags), "", ""))
+
+    # ── Sweeps ────────────────────────────────────────────
+    if kind == "sweep":
+        rows.append(BLANK)
+        total = d.get("total_points", 0)
+        ndim = d.get("ndim", 0)
+        rows.append((f"Sweeps {ndim}D", f"{total:,} pts", "", ""))
+        for sw in sweeps:
+            ax = sw["axis"]
+            n = sw["n"]
+            rev_tag = " ↔" if sw.get("reverse") else ""
+            if sw["type"] == "multi":
+                for j, p in enumerate(sw["parameters"]):
+                    rng = f"{p['min']:>10.4g} → {p['max']:<10.4g}"
+                    unit_str = p.get("unit") or ""
+                    if j == 0:
+                        rows.append((f"  [{ax}] {p['name']}", rng, f"{n} pts{rev_tag}", unit_str))
+                    else:
+                        rows.append((f"      └── {p['name']}", rng, "", unit_str))
+            else:
+                rng = f"{sw['min']:>10.4g} → {sw['max']:<10.4g}"
+                unit_str = sw.get("unit") or ""
+                rows.append((f"  [{ax}] {sw['parameter']}", rng, f"{n} pts{rev_tag}", unit_str))
+
+    # ── Readouts ──────────────────────────────────────────
+    rows.append(BLANK)
+    _header("Readouts")
+    for r in readouts:
+        unit_str = r.get("unit") or ""
+        shape_str = f"shape={r['shape']}" if r.get("shape") else ""
+        rows.append((f"  {r['name']}", r["kind"], shape_str, unit_str))
+
+    # ── Settings ──────────────────────────────────────────
+    rows.append(BLANK)
+    _header("Settings")
+    s = d.get("settings", {})
+    if kind == "sweep":
+        rows.append(("  write_mode", s.get("write_mode", ""), "", ""))
+        settle = s.get("settle_time", 0) or 0
+        if settle > 0:
+            settle_str = f"{settle * 1000:.4g} ms" if settle < 1 else f"{settle:.4g} s"
+            rows.append(("  settle_time", settle_str, "", ""))
+        if s.get("snake"):
+            rows.append(("  snake", "True", "", ""))
+        rows.append(("  error_policy", s.get("error_policy", ""), "", ""))
+        est = d.get("estimated_duration_s", 0) or 0
+        if est > 0:
+            rows.append(("  est. duration", f"~{_format_duration(est)}", "", ""))
+    else:
+        dur = s.get("duration")
+        rows.append(("  interval",   f"{s.get('interval', 1.0)} s", "", ""))
+        rows.append(("  duration",   _format_duration(dur) if dur else "unlimited", "", ""))
+        rows.append(("  chunk_size", str(s.get("chunk_size", 256)), "", ""))
+
+    # ── Hooks ─────────────────────────────────────────────
+    if active_hooks:
+        rows.append(BLANK)
+        _header("Hooks")
+        for hname, hinfo in active_hooks.items():
+            fn_name = hinfo.get("name", "?")
+            doc = hinfo.get("doc") or ""
+            note = hinfo.get("note") or ""
+            first_line = doc.split("\n")[0] if doc else ""
+            extra = f'"{first_line}"' if first_line else f"({note})" if note else ""
+            rows.append((f"  {hname}", fn_name, extra, ""))
+
+    # ── Render ────────────────────────────────────────────
+    # tabulate receives plain text only — no ANSI codes — so column widths
+    # are measured correctly. Bold and separators are applied in post-processing.
+    text = _tabulate(rows, tablefmt="plain")
+    lines = text.splitlines()
+    W = max((len(line) for line in lines if line.strip()), default=52)
+    sep = "─" * W
+
+    out = []
+    for i, line in enumerate(lines):
+        if not line.strip():
+            out.append(sep)
+        elif i in bold_indices:
+            out.append(f"{BOLD}{line}{RESET}")
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def read_procedure(data_dir: str | Path, print_summary: bool = True) -> dict:
+    """Read procedure.yaml from an experiment data directory.
+
+    Parameters
+    ----------
+    data_dir : str or Path
+        Path to the experiment directory (containing procedure.yaml).
+    print_summary : bool
+        If True (default), print a formatted summary table.
+
+    Returns
+    -------
+    dict
+        The procedure dictionary.
+
+    Examples
+    --------
+    >>> d = read_procedure("./data/0042")
+    >>> d = read_procedure("./data/0042", print_summary=False)
+    """
+    path = Path(data_dir) / "procedure.yaml"
+    if not path.exists():
+        raise FileNotFoundError(f"No procedure.yaml in {data_dir}")
+    d = yaml.safe_load(path.read_text()) or {}
+    if print_summary:
+        print(_format_procedure_summary(d))
+    return d
 
 
 def read_metadata(data_dir: str | Path) -> dict:

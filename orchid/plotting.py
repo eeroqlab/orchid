@@ -116,6 +116,11 @@ class LivePlotter:
     update_interval : int
         Dash polling interval in milliseconds. Lower = faster updates
         but more CPU. Default 500ms.
+    max_display_pts : int
+        Maximum points shown on line plots. For sweep plots the buffer is
+        sized exactly to the inner sweep length (always fits, no cap).
+        For monitors, once this limit is reached the oldest sample is
+        dropped on each new point (rolling window). Default 5000.
 
     Examples
     --------
@@ -138,6 +143,7 @@ class LivePlotter:
         open_browser: bool = True,
         update_interval: int = 500,
         event_line: EventLineConfig | None = None,
+        max_display_pts: int = 5000,
     ):
         self.specs = plots
         self.port = port
@@ -146,6 +152,7 @@ class LivePlotter:
         self.open_browser = open_browser
         self.update_interval = update_interval
         self.event_line = event_line if event_line is not None else EventLineConfig()
+        self.max_display_pts = max_display_pts
 
         # Internal state — all plain dicts/lists, no plotly objects
         self._fig_dict: dict | None = None
@@ -243,11 +250,15 @@ class LivePlotter:
             self._data_version += 1
 
     def update_monitor(self, sample_idx: int, data: dict, timestamp: float) -> None:
-        """Update plots for monitoring mode. Called by the runner."""
+        """Update plots for monitoring mode. Called by the runner.
+
+        Uses a pre-allocated rolling numpy buffer of size max_display_pts.
+        When the buffer is full, the oldest sample is dropped (O(n) numpy
+        shift in C — fast in practice) and the new sample is placed at the end.
+        """
         if self._fig_dict is None:
             return
 
-        # Track start time for relative timestamps
         if self._t0 is None:
             self._t0 = timestamp
 
@@ -263,6 +274,8 @@ class LivePlotter:
 
             if ptype == "line":
                 state = self._sweep_data[i]
+                n = state["_n"]
+                cap = state["_cap"]
 
                 if spec.x == "_time":
                     x_val, unit = self._format_elapsed(elapsed)
@@ -275,26 +288,36 @@ class LivePlotter:
                             self._fig_dict["layout"][axis_key] = {}
                         self._fig_dict["layout"][axis_key]["title"] = {"text": new_label}
                         # Rescale existing x values when unit changes
-                        if state["x"] and state.get("_unit") != unit:
+                        if n > 0 and state.get("_unit") != unit:
                             divisor = self._unit_divisor(unit)
-                            state["x"] = [(t - self._t0) / divisor
-                                          for t in state["_raw_t"]]
+                            state["x"][:n] = (state["_raw_t"][:n] - self._t0) / divisor
                         state["_unit"] = unit
                 else:
                     x_val = data.get(spec.x, sample_idx)
 
-                y_val = data[spec.y]
+                x_float = float(x_val)
+                y_float = float(data[spec.y])
 
-                state["x"].append(float(x_val))
-                state["y"].append(float(y_val))
-                # Keep raw timestamps for rescaling
-                if spec.x == "_time":
-                    if "_raw_t" not in state:
-                        state["_raw_t"] = []
-                    state["_raw_t"].append(timestamp)
+                if n < cap:
+                    state["x"][n] = x_float
+                    state["y"][n] = y_float
+                    if spec.x == "_time":
+                        state["_raw_t"][n] = timestamp
+                    state["_n"] = n + 1
+                else:
+                    # Rolling window: shift buffer left by 1 (numpy C-level copy)
+                    state["x"][:-1] = state["x"][1:]
+                    state["y"][:-1] = state["y"][1:]
+                    if spec.x == "_time":
+                        state["_raw_t"][:-1] = state["_raw_t"][1:]
+                        state["_raw_t"][-1] = timestamp
+                    state["x"][-1] = x_float
+                    state["y"][-1] = y_float
+                    # n stays at cap
 
-                self._fig_dict["data"][i]["x"] = list(state["x"])
-                self._fig_dict["data"][i]["y"] = list(state["y"])
+                display_n = state["_n"]
+                self._fig_dict["data"][i]["x"] = state["x"][:display_n]
+                self._fig_dict["data"][i]["y"] = state["y"][:display_n]
 
         self._data_version += 1
 
@@ -453,7 +476,25 @@ class LivePlotter:
                 )
                 fig.update_xaxes(title_text=spec.x, row=row, col=1)
                 fig.update_yaxes(title_text=spec.y, row=row, col=1)
-                self._sweep_data[i] = {"x": [], "y": []}
+
+                # Pre-allocate numpy buffers.
+                # Sweep procedures: bounded by inner sweep length (known upfront).
+                # Monitor procedures: capped at max_display_pts (rolling window).
+                if hasattr(proc, "sweeps") and proc.sweeps:
+                    cap = proc.sweeps[-1].length
+                else:
+                    cap = self.max_display_pts
+                state: dict = {
+                    "x": np.empty(cap, dtype=np.float64),
+                    "y": np.empty(cap, dtype=np.float64),
+                    "_n": 0,
+                    "_cap": cap,
+                }
+                # Raw timestamps only needed for auto-scaling time axis
+                if spec.x == "_time":
+                    state["_raw_t"] = np.empty(cap, dtype=np.float64)
+                    state["_unit"] = None
+                self._sweep_data[i] = state
 
             elif ptype == "heatmap":
                 # Find sweep objects matching spec.x (heatmap x-axis)
@@ -570,39 +611,48 @@ class LivePlotter:
     # ── Internal update methods ───────────────────────────────────────
 
     def _update_line(self, spec_idx, spec, data, sweep_values):
-        """Update a line trace.
+        """Update a line trace using pre-allocated numpy buffers.
 
         x can be a sweep parameter name or a readout name.
 
         Sweep parameter as x: shows only the current inner sweep row —
-        resets when a new inner sweep starts (x wraps back to start).
+        resets (O(1) pointer reset) when a new inner sweep starts.
 
         Readout as x: accumulates all points across the full experiment
         (useful for readout-vs-readout plots, e.g. Lissajous).
         """
         state = self._sweep_data[spec_idx]
-
-        # x can be a sweep parameter or a readout
         x_from_sweep = spec.x in sweep_values
         x_val = sweep_values.get(spec.x) if x_from_sweep else data.get(spec.x)
         y_val = data[spec.y]
 
         if isinstance(x_val, np.ndarray):
-            # Sweep-level update: full row at once
-            state["x"] = x_val.tolist()
-            state["y"] = y_val.tolist() if isinstance(y_val, np.ndarray) else [float(y_val)]
+            # Sweep-level update: full row arrives at once (SWEEPWISE)
+            length = len(x_val)
+            y_arr = y_val if isinstance(y_val, np.ndarray) else np.full(length, float(y_val))
+            # Grow buffer if this sweep is somehow larger than pre-allocated capacity
+            if length > state["_cap"]:
+                state["x"] = np.empty(length, dtype=np.float64)
+                state["y"] = np.empty(length, dtype=np.float64)
+                state["_cap"] = length
+            state["x"][:length] = x_val
+            state["y"][:length] = y_arr
+            state["_n"] = length
         else:
-            x_float = float(x_val) if x_val is not None else len(state["x"])
-            # Only reset on new inner sweep when x is a sweep parameter;
-            # readout-vs-readout plots accumulate all points.
-            if x_from_sweep and len(state["x"]) >= 2 and x_float <= state["x"][0]:
-                state["x"] = []
-                state["y"] = []
-            state["x"].append(x_float)
-            state["y"].append(float(y_val))
+            x_float = float(x_val) if x_val is not None else float(state["_n"])
+            n = state["_n"]
+            # Reset on new inner sweep (sweep-parameter x only); O(1) pointer reset
+            if x_from_sweep and n >= 2 and x_float <= state["x"][0]:
+                state["_n"] = 0
+                n = 0
+            if n < state["_cap"]:
+                state["x"][n] = x_float
+                state["y"][n] = float(y_val)
+                state["_n"] = n + 1
 
-        self._fig_dict["data"][spec_idx]["x"] = list(state["x"])
-        self._fig_dict["data"][spec_idx]["y"] = list(state["y"])
+        n = state["_n"]
+        self._fig_dict["data"][spec_idx]["x"] = state["x"][:n]
+        self._fig_dict["data"][spec_idx]["y"] = state["y"][:n]
 
     def _update_heatmap(self, spec_idx, spec, index, data):
         """Fill one row or one cell of the heatmap."""
