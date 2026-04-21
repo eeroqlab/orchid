@@ -751,6 +751,44 @@ plotter = LivePlotter([
 runner.run(proc, plotter=plotter)
 ```
 
+#### Multiple traces in one subplot
+
+Pass a list to `y` to overlay several readouts in the same axes — useful for comparing
+channels (e.g. X and Y from a lock-in, or signal vs. reference):
+
+```python
+plotter = LivePlotter([
+    PlotSpec(x="Vgt", y=["lockin_X", "lockin_Y"]),   # both on one subplot
+])
+runner.run(proc, plotter=plotter)
+```
+
+Mix single and multi-trace subplots freely:
+
+```python
+plotter = LivePlotter([
+    PlotSpec(x="Vgt", y=["lockin_X", "lockin_Y"]),   # XY on top
+    PlotSpec(x="Vgt", y="temperature"),               # temperature below
+])
+```
+
+All readout names passed in `y` must be present in the procedure's `readouts` list.
+If a readout is missing from a particular data point (e.g. due to an error), that
+trace is silently skipped for that update.
+
+#### Heatmap colorscale
+
+Override the default colorscale per subplot with the `colorscale` argument
+(any Plotly colorscale name or custom list). Leave it as `None` to use the
+active template default (set by `apply_theme`):
+
+```python
+plotter = LivePlotter([
+    PlotSpec(x="fac", y="Vgt", z="lockin_X", colorscale="RdBu_r"),
+    PlotSpec(x="fac", y="Vgt", z="lockin_Y", colorscale="Viridis"),
+])
+```
+
 #### Time-series monitoring
 
 When `x="_time"`, the x-axis shows elapsed time starting from zero. The axis label auto-scales: seconds (s) for < 2 min, minutes (min) for < 2 hr, hours (hr) beyond that.
@@ -1616,14 +1654,15 @@ from orchid import PlotSpec
 
 Describes one subplot in a `LivePlotter`.
 
-| Argument      | Type               | Default   | Description                                      |
-|---------------|--------------------|-----------|--------------------------------------------------|
-| `x`           | `str`              | required  | Line: sweep parameter name **or readout name** for x-axis. Heatmap: x-axis sweep param. Monitor: `"_time"` or readout name. |
-| `y`           | `str`              | required  | Line: readout name (y-axis). Heatmap: y-axis sweep param. |
-| `z`           | `str` or `None`    | `None`    | Heatmap only: readout name for color values. Required for heatmaps. |
-| `plot_type`   | `str`              | `"auto"`  | `"line"`, `"heatmap"`, or `"auto"` (infer from ndim) |
-| `update_every`| `str`              | `"sweep"` | `"point"`, `"sweep"`, or `"plane"`               |
-| `update_func` | `callable` or `None` | `None`  | Custom `(fig_dict, index, data) -> None`         |
+| Argument      | Type                    | Default   | Description                                      |
+|---------------|-------------------------|-----------|--------------------------------------------------|
+| `x`           | `str`                   | required  | Line: sweep parameter name **or readout name** for x-axis. Heatmap: x-axis sweep param. Monitor: `"_time"` or readout name. |
+| `y`           | `str` or `list[str]`    | required  | Line: readout name(s) for y-axis — pass a list to overlay multiple traces in one subplot. Heatmap: y-axis sweep param (string only). |
+| `z`           | `str` or `None`         | `None`    | Heatmap only: readout name for color values. Required for heatmaps. |
+| `plot_type`   | `str`                   | `"auto"`  | `"line"`, `"heatmap"`, or `"auto"` (infer from ndim) |
+| `update_every`| `str`                   | `"sweep"` | `"point"`, `"sweep"`, or `"plane"`               |
+| `update_func` | `callable` or `None`    | `None`    | Custom `(fig_dict, index, data) -> None`         |
+| `colorscale`  | `str`, `list`, or `None`| `None`    | Heatmap only: Plotly colorscale name (e.g. `"Inferno"`, `"RdBu_r"`) or a custom scale list. `None` uses the active template default. |
 
 ---
 
@@ -1796,8 +1835,53 @@ loop:
 ### Utility Functions
 
 ```python
-from orchid import read_events, read_metadata, read_procedure, update_metadata
+from orchid import apply_theme, PALETTE, read_events, read_metadata, read_procedure, update_metadata
 ```
+
+**`apply_theme(palette="vivid", colorscale="Inferno", name="sw_clean", base="simple_white") -> str`**
+
+Register a Plotly template and set it as the global default. Called automatically when
+`orchid.plotting` is imported (with default arguments), so plots look consistent without
+any extra setup. Call again to switch themes.
+
+| Argument     | Type              | Default          | Description                                          |
+|--------------|-------------------|------------------|------------------------------------------------------|
+| `palette`    | `str` or `list[str]` | `"vivid"`     | Colour cycle. Key from `PALETTE` or a custom list of CSS/hex strings. |
+| `colorscale` | `str`             | `"Inferno"`      | Plotly colorscale for heatmaps (e.g. `"RdBu_r"`, `"Plasma"`). |
+| `name`       | `str`             | `"sw_clean"`     | Template name registered in `pio.templates`.         |
+| `base`       | `str`             | `"simple_white"` | Base Plotly template to stack under the orchid template. |
+
+Returns the full template string set as default (e.g. `"simple_white+sw_clean"`).
+
+```python
+from orchid import apply_theme, PALETTE
+
+apply_theme()                                   # defaults (vivid palette, Inferno heatmap)
+apply_theme(palette="muted")                    # switch colour cycle
+apply_theme(palette=PALETTE["pastel"], colorscale="RdBu_r")
+apply_theme(base="plotly_dark", colorscale="Plasma")   # dark theme
+```
+
+**`PALETTE`** — `dict[str, list[str]]`
+
+Built-in named colour cycles for use with `apply_theme`:
+
+| Key       | Description                                         |
+|-----------|-----------------------------------------------------|
+| `"vivid"` | Vivid but balanced — good for presentations (default) |
+| `"muted"` | Desaturated — reads well in print and on screen     |
+| `"pastel"`| Soft tones — nice for dense overlapping traces      |
+| `"minimal"`| 4-colour high-contrast set, works in greyscale     |
+
+```python
+from orchid import PALETTE
+
+apply_theme(palette=PALETTE["muted"])
+# or build your own:
+apply_theme(palette=["#003049", "#D62828", "#2FA084"])
+```
+
+---
 
 **`read_procedure(data_dir, print_summary=True) -> dict`**
 

@@ -6,7 +6,7 @@ from .context import ExperimentContext
 from .procedure import ErrorPolicy, MonitorProcedure, MultiSweep, Procedure, Sweep, WriteMode
 from .runner import ExperimentRunner
 from .plotting import EventLineConfig, LivePlotter, PlotSpec
-from .utils import read_events, read_metadata, read_procedure, update_metadata
+from .utils import apply_theme, read_events, read_metadata, read_procedure, update_metadata, PALETTE
 
 __all__ = [
     "InstrumentAdapter",
@@ -24,6 +24,8 @@ __all__ = [
     "EventLineConfig",
     "LivePlotter",
     "PlotSpec",
+    "apply_theme",
+    "PALETTE",
     "read_events",
     "read_metadata",
     "read_procedure",

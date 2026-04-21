@@ -15,7 +15,7 @@ Orchid connects your lab instruments (pymeasure, qcodes, or custom drivers) to a
 - **Flexible write modes** — write per point, per sweep, per plane, or all at once
 - **Custom hooks** — inject logic before/after experiments, sweeps, and measurement points
 - **Async support** — both sync and async instrument drivers
-- **Live plotting** — real-time plotly FigureWidget (line, heatmap, custom) in Jupyter
+- **Live plotting** — real-time Dash browser window (line, heatmap, multi-trace, custom)
 - **Configurable error handling** — stop, retry+skip, or ignore
 - **Automatic data saving** — Zarr v3 (via zarro) with metadata YAML
 - **Live snapshot** — `ctx.snapshot()` prints a formatted table of all current values

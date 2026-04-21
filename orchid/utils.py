@@ -3,8 +3,126 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import yaml
+
+
+# ── Plot theme ────────────────────────────────────────────────────────
+
+PALETTE: dict[str, list[str]] = {
+    # Muted, desaturated — reads well in print and on screen
+    "muted": [
+        "#4878d0",  # slate blue
+        "#ee854a",  # terracotta
+        "#6acc64",  # sage green
+        "#d65f5f",  # muted red
+        "#956cb4",  # dusty purple
+        "#8c613c",  # warm brown
+        "#dc7ec0",  # mauve
+        "#797979",  # mid grey
+    ],
+    # Vivid but balanced — good for presentations and screens
+    "vivid": [
+        "#003049",  # deep navy
+        "#D62828",  # vivid red
+        "#2FA084",  # teal
+        "#F77F00",  # vivid orange
+        "#FCBF49",  # vivid yellow
+        "#76D2DB",  # sky blue
+        "#263B6A",  # dark blue
+        "#6984A9",  # steel blue
+        "#A0D585",  # light green
+    ],
+    # Pastel / soft — nice for dense overlapping traces
+    "pastel": [
+        "#7eb0d5",  # powder blue
+        "#fd7f6f",  # salmon
+        "#b2e061",  # lime
+        "#bd7ebe",  # lilac
+        "#ffb55a",  # peach
+        "#ffee65",  # butter
+        "#beb9db",  # periwinkle
+        "#fdcce5",  # blush
+    ],
+    # High contrast minimal — 4 colors, works in grayscale too
+    "minimal": [
+        "#2166ac",  # deep blue
+        "#d6604d",  # brick red
+        "#4dac26",  # forest green
+        "#1a1a1a",  # near black
+    ],
+}
+
+
+def apply_theme(
+    palette: str | list[str] = "vivid",
+    colorscale: str = "Inferno",
+    name: str = "sw_clean",
+    base: str = "simple_white",
+) -> str:
+    """Register an orchid plot theme and set it as the Plotly default.
+
+    Call this once (it is applied automatically when orchid.plotting is
+    imported). Call again with different arguments to switch themes.
+
+    Parameters
+    ----------
+    palette : str or list of str
+        Colour cycle. Pass a key from ``orchid.PALETTE`` or a custom list
+        of CSS/hex colour strings.
+    colorscale : str
+        Plotly colorscale name for heatmaps (e.g. ``"Inferno"``, ``"RdBu_r"``).
+    name : str
+        Name under which the template is registered in ``pio.templates``.
+    base : str
+        Base Plotly template to stack under the orchid template
+        (e.g. ``"simple_white"``, ``"plotly_dark"``).
+
+    Returns
+    -------
+    str
+        The full template string that was set as default
+        (e.g. ``"simple_white+sw_clean"``).
+
+    Examples
+    --------
+    >>> from orchid import apply_theme, PALETTE
+    >>> apply_theme()                          # defaults
+    >>> apply_theme(palette="muted")           # different palette
+    >>> apply_theme(palette=PALETTE["pastel"], colorscale="RdBu_r")
+    >>> apply_theme(base="plotly_dark", colorscale="Plasma")
+    """
+    import plotly.graph_objects as go
+    import plotly.io as pio
+
+    colors = PALETTE[palette] if isinstance(palette, str) else palette
+
+    _axis = dict(
+        showline=True,
+        linewidth=1.0,
+        linecolor="#111111",
+        mirror=True,        # border on all four sides
+        showgrid=True,
+        gridcolor="#eeeeee",
+        gridwidth=0.5,
+        zeroline=False,
+    )
+
+    pio.templates[name] = go.layout.Template(
+        layout=go.Layout(
+            xaxis=_axis,
+            yaxis=_axis,
+            colorway=colors,
+        ),
+        data=go.layout.template.Data(
+            heatmap=[go.Heatmap(colorscale=colorscale)]
+        ),
+    )
+
+    full = f"{base}+{name}"
+    pio.templates.default = full
+    return full
 
 # 1. Define bold escape sequences
 BOLD = "\033[1m"
