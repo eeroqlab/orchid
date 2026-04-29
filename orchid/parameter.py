@@ -110,8 +110,10 @@ class Readout:
         Trailing shape for TRACE (N,) or IMAGE (H, W). Required for non-scalar.
     unit : str, optional
         Physical unit.
-    contains : str, optional
+    contains : str or list of str, optional
         Human-readable description of what is measured.
+        For IMAGE readouts, pass a list of column names, e.g.
+        ``["f", "mag", "phase"]``, so plotters can resolve columns by name.
     """
 
     name: str
@@ -119,7 +121,7 @@ class Readout:
     get_func: Callable[[], Any] = None
     shape: tuple[int, ...] | None = None
     unit: str | None = None
-    contains: str | None = None
+    contains: str | list[str] | None = None
 
     def __post_init__(self):
         if self.kind != DataKind.SCALAR and self.shape is None:

@@ -10,6 +10,8 @@ from typing import Any, Callable
 
 import numpy as np
 
+from .parameter import DataKind
+
 
 @dataclass
 class EventLineConfig:
@@ -18,23 +20,36 @@ class EventLineConfig:
     Parameters
     ----------
     color : str
-        Line and label color. Any CSS/plotly color string.
+        Line and label font color. Any CSS/plotly color string.
     width : int
         Line width in pixels.
     dash : str
         Line style: ``"solid"``, ``"dot"``, ``"dash"``, ``"longdash"``, ``"dashdot"``.
     font_size : int
         Label font size in points.
+    bgcolor : str
+        Label box background color. Use ``rgba(r,g,b,a)`` for transparency.
+    bordercolor : str
+        Label box border color.
+    borderwidth : int
+        Label box border width in pixels.
+    borderpad : int
+        Padding in pixels between the label text and the box border.
 
     Examples
     --------
-    >>> EventLineConfig(color="rgba(0,150,255,0.8)", dash="dot", width=2)
+    >>> EventLineConfig(color="#444444", dash="dot", width=2)
+    >>> EventLineConfig(color="#2255cc", bgcolor="rgba(255,255,255,0.0)")  # no box
     """
 
-    color: str = "rgba(255,80,80,0.7)"
-    width: int = 1
+    color: str = "#444444"
+    width: int = 2
     dash: str = "dash"
-    font_size: int = 9
+    font_size: int = 15
+    bgcolor: str = "rgba(255,255,255,0.85)"
+    bordercolor: str = "#000000"
+    borderwidth: int = 1
+    borderpad: int = 3
 
 
 @dataclass
@@ -43,32 +58,48 @@ class PlotSpec:
 
     Parameters
     ----------
-    x : str
-        Sweep parameter name for the x-axis.
-        For line plots: the horizontal axis.
-        For heatmaps: the horizontal axis (typically the inner sweep).
-        For monitors: use "_time" for timestamps.
-    y : str
-        For line plots: readout name for the vertical axis.
-        For heatmaps: sweep parameter name for the vertical axis
-        (typically the outer sweep).
+    x : str or array-like
+        Sweep parameter name (str) or fixed axis values (array).
+        For line / heatmap / monitor: a string parameter name or ``"_time"``.
+        For **live_trace**: a fixed array of axis values (e.g. frequencies).
+            The plot type is auto-detected when ``x`` is an array.
+    y : str or list of str or array-like
+        For line plots: readout name, or a list of readout names to overlay.
+        For heatmaps: outer sweep parameter name.
+        For **trace_heatmap**: a fixed array of axis values (e.g. frequencies).
+            The plot type is auto-detected when ``y`` is an array.
     z : str, optional
-        Readout name for the color axis (heatmaps only).
-        Required when plot_type is "heatmap". Ignored for line plots.
+        Readout name for the color axis.
+        Required for ``"heatmap"`` and ``"trace_heatmap"``. Ignored for line.
+    z_col : int or str or None
+        Column selector for IMAGE or TRACE readouts used as ``z`` (or ``y``
+        for ``live_trace``).
+        - ``None`` (default): use the whole array (valid for TRACE readouts).
+        - ``int``: column index.
+        - ``str``: column name, resolved via ``readout.contains``.
+        Ignored for SCALAR readouts.
     plot_type : str
-        "line", "heatmap", or "auto".
-        "auto" infers from experiment dimensionality:
-        1D -> line, 2D -> heatmap.
+        ``"line"``, ``"heatmap"``, ``"live_trace"``, ``"trace_heatmap"``,
+        or ``"auto"`` (default).
+        ``"auto"`` infers the type from the types of ``x`` and ``y``:
+
+        ============  ============  ====================
+        ``x``         ``y``         resolved type
+        ============  ============  ====================
+        str           str, ndim=1   line
+        str           str, ndim≥2   heatmap
+        array         str           live_trace
+        str           array         trace_heatmap
+        ============  ============  ====================
+
     update_every : str
-        Controls how often the plot refreshes. Independent of write_mode.
-        "point" — update after every measurement point.
-        "sweep" — update after each inner sweep completes (default).
-        "plane" — update after each 2D plane completes.
+        ``"point"`` — update after every measurement point (use for
+        ``live_trace`` / ``trace_heatmap`` with a 1D sweep).
+        ``"sweep"`` — update after each inner sweep completes (default).
+        ``"plane"`` — update after each 2D plane completes.
     update_func : callable, optional
-        Custom update function with signature (fig_dict, index, data) -> None.
-        If provided, overrides the default plot update logic.
-        ``fig_dict`` is the raw plotly figure dictionary, ``index`` is the
-        current sweep index tuple, ``data`` is a dict of readout name -> value(s).
+        Custom update function ``(fig_dict, index, data) -> None``.
+        Overrides built-in update logic when set.
 
     Examples
     --------
@@ -80,24 +111,48 @@ class PlotSpec:
 
         PlotSpec(x="fac", y="Vgt", z="lockin_X")
 
-    Auto-detect (uses y as readout for line, requires z for heatmap)::
+    Live trace — current VNA trace refreshing each power step::
 
-        PlotSpec(x="Vgt", y="lockin_X")             # 1D -> line
-        PlotSpec(x="fac", y="Vgt", z="lockin_X")    # 2D -> heatmap
+        PlotSpec(x=freqs, y="S21", z_col="mag", update_every="point")
+
+    Trace heatmap — accumulate VNA traces vs power::
+
+        PlotSpec(x="vna_power", y=freqs, z="S21", z_col="mag",
+                 update_every="point")
+
+    Trace heatmap from a plain TRACE readout (no z_col needed)::
+
+        PlotSpec(x="vna_power", y=freqs, z="mag", update_every="point")
     """
 
-    x: str
-    y: str | list[str]          # one readout name, or a list to overlay multiple traces
+    x: str | np.ndarray | list
+    y: str | list[str] | np.ndarray | list
     z: str | None = None
+    z_col: int | str | None = None
     plot_type: str = "auto"
     update_every: str = "sweep"
     update_func: Callable | None = None
-    colorscale: str | list | None = None  # heatmap only; None = use template default
+    colorscale: str | list | None = None  # heatmap / trace_heatmap only
 
 
 def _y_list(spec: PlotSpec) -> list[str]:
-    """Normalise PlotSpec.y to a list of readout names."""
-    return spec.y if isinstance(spec.y, list) else [spec.y]
+    """Normalise PlotSpec.y to a list of readout name strings.
+
+    Returns an empty list when y is an array (trace_heatmap axis values).
+    """
+    if isinstance(spec.y, np.ndarray):
+        return []
+    if isinstance(spec.y, list):
+        # list of strings → multi-y overlay; list of numbers → axis values
+        if spec.y and isinstance(spec.y[0], str):
+            return spec.y
+        return []
+    return [spec.y]
+
+
+def _is_array(v) -> bool:
+    """True when v is an array-like axis specification (not a string)."""
+    return isinstance(v, (np.ndarray, list)) and not isinstance(v, str)
 
 
 class LivePlotter:
@@ -194,34 +249,43 @@ class LivePlotter:
 
         n = len(self.specs)
 
-        # Resolve auto plot types
-        # "auto" uses heatmap only if z is provided AND ndim >= 2,
-        # otherwise defaults to line.
+        # Resolve auto plot types.
+        # Discriminated by the Python type of x and y:
+        #   x is array                   → live_trace
+        #   y is array                   → trace_heatmap
+        #   both str, ndim >= 2, z given → heatmap
+        #   otherwise                    → line
         self._resolved_types = []
         for spec in self.specs:
             if spec.plot_type == "auto":
-                if spec.z and hasattr(proc, "sweeps") and len(proc.sweeps) >= 2:
+                if _is_array(spec.x):
+                    self._resolved_types.append("live_trace")
+                elif _is_array(spec.y):
+                    self._resolved_types.append("trace_heatmap")
+                elif spec.z and hasattr(proc, "sweeps") and len(proc.sweeps) >= 2:
                     self._resolved_types.append("heatmap")
                 else:
                     self._resolved_types.append("line")
             else:
                 self._resolved_types.append(spec.plot_type)
 
-        # Validate y readout names for line plots only.
-        # For heatmaps, y is the outer sweep parameter (not a readout) — only z is.
+        # Validate readout names.
         if hasattr(proc, "context"):
             registered = set(proc.context.readouts.keys())
             for spec, ptype in zip(self.specs, self._resolved_types):
                 if ptype == "heatmap":
+                    readout_names = [spec.z] if spec.z else []
+                elif ptype == "live_trace":
+                    readout_names = [spec.y] if isinstance(spec.y, str) else []
+                elif ptype == "trace_heatmap":
                     readout_names = [spec.z] if spec.z else []
                 else:
                     readout_names = [y for y in _y_list(spec) if y != "_time"]
                 for name in readout_names:
                     if name not in registered:
                         raise ValueError(
-                            f"PlotSpec {'z' if ptype == 'heatmap' else 'y'}={name!r} "
-                            f"is not a registered readout. Add it to your procedure's "
-                            f"readouts list. Registered: {sorted(registered)}"
+                            f"PlotSpec readout {name!r} is not registered. "
+                            f"Registered: {sorted(registered)}"
                         )
 
         # Build figure as a plain dict (never a go.Figure, so Jupyter
@@ -261,9 +325,12 @@ class LivePlotter:
                 changed = True
                 continue
 
-            # Check that at least one relevant readout is present in data
-            if ptype == "heatmap":
+            # Check that the relevant readout is present in data
+            if ptype in ("heatmap", "trace_heatmap"):
                 if spec.z not in data:
+                    continue
+            elif ptype == "live_trace":
+                if not isinstance(spec.y, str) or spec.y not in data:
                     continue
             else:
                 if not any(y in data for y in _y_list(spec)):
@@ -274,6 +341,12 @@ class LivePlotter:
                 changed = True
             elif ptype == "heatmap":
                 self._update_heatmap(i, spec, index, data)
+                changed = True
+            elif ptype == "live_trace":
+                self._update_live_trace(i, spec, data)
+                changed = True
+            elif ptype == "trace_heatmap":
+                self._update_trace_heatmap(i, spec, index, data)
                 changed = True
 
         if changed:
@@ -462,13 +535,17 @@ class LivePlotter:
                 "xref": xref,
                 "yref": "paper",
                 "x": x_val,
-                "y": y1,
+                "y": (y0 + y1) / 2,
                 "text": label,
                 "showarrow": False,
                 "textangle": -90,
                 "font": {"size": self.event_line.font_size, "color": self.event_line.color},
-                "xanchor": "left",
-                "yanchor": "top",
+                "xanchor": "center",
+                "yanchor": "middle",
+                "bgcolor": self.event_line.bgcolor,
+                "bordercolor": self.event_line.bordercolor,
+                "borderwidth": self.event_line.borderwidth,
+                "borderpad": self.event_line.borderpad,
             })
 
         self._data_version += 1
@@ -503,7 +580,7 @@ class LivePlotter:
         subplot_types = []
         for pt in self._resolved_types:
             subplot_types.append(
-                {"type": "heatmap"} if pt == "heatmap" else {"type": "xy"}
+                {"type": "heatmap"} if pt in ("heatmap", "trace_heatmap") else {"type": "xy"}
             )
 
         fig = make_subplots(
@@ -593,12 +670,58 @@ class LivePlotter:
                 self._sweep_data[i] = [{"z": z}]
                 trace_idx += 1
 
+            elif ptype == "live_trace":
+                # Fixed x-axis (e.g. frequencies); y overwrites each sweep step.
+                x_arr = np.asarray(spec.x, dtype=np.float64)
+                n_pts = len(x_arr)
+                y_label = spec.y if isinstance(spec.y, str) else "value"
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_arr.tolist(),
+                        y=[np.nan] * n_pts,
+                        mode="lines",
+                        name=y_label,
+                    ),
+                    row=row, col=1,
+                )
+                fig.update_xaxes(title_text="", row=row, col=1)
+                fig.update_yaxes(title_text=y_label, row=row, col=1)
+                self._sweep_data[i] = [{"y": np.full(n_pts, np.nan)}]
+                trace_idx += 1
+
+            elif ptype == "trace_heatmap":
+                # Fixed y-axis (e.g. frequencies); x grows with each sweep step.
+                y_arr = np.asarray(spec.y, dtype=np.float64)
+                n_freq = len(y_arr)
+                x_sweep = next(
+                    (s for s in proc.sweeps if s.parameter.name == spec.x),
+                    proc.sweeps[0],
+                )
+                x_vals = x_sweep.values
+                n_steps = len(x_vals)
+                z = np.full((n_freq, n_steps), np.nan)
+                fig.add_trace(
+                    go.Heatmap(
+                        z=z.tolist(),
+                        x=x_vals.tolist(),
+                        y=y_arr.tolist(),
+                        **({"colorscale": spec.colorscale} if spec.colorscale else {}),
+                        name=spec.z,
+                        colorbar=dict(title=spec.z),
+                    ),
+                    row=row, col=1,
+                )
+                fig.update_xaxes(title_text=spec.x, row=row, col=1)
+                fig.update_yaxes(title_text="", row=row, col=1)
+                self._sweep_data[i] = [{"z": z}]
+                trace_idx += 1
+
         # Fix colorbar positions for heatmap traces.
         # Plotly defaults to y=0.5, len=1.0 (full figure height), so in a
         # multi-subplot layout every colorbar spans the entire figure.
         # Read each subplot's yaxis.domain and pin the colorbar to it.
         for i, (spec, ptype) in enumerate(zip(self.specs, self._resolved_types)):
-            if ptype != "heatmap":
+            if ptype not in ("heatmap", "trace_heatmap"):
                 continue
             row = i + 1
             axis_key = "yaxis" if row == 1 else f"yaxis{row}"
@@ -764,6 +887,80 @@ class LivePlotter:
             col_idx = index[-1] if len(index) >= 2 else 0
             state["z"][row_idx, col_idx] = z_val
 
+        self._fig_dict["data"][self._trace_offsets[spec_idx]]["z"] = state["z"].tolist()
+
+    def _resolve_col(self, z_col, readout) -> int | None:
+        """Resolve z_col to an integer column index, or None (use whole array).
+
+        Rules:
+          TRACE kind + z_col=None  → None (use whole 1-D array)
+          TRACE kind + z_col given → warning, ignored, return None
+          IMAGE kind + z_col=None  → 0 with a warning
+          IMAGE kind + int         → used directly
+          IMAGE kind + str         → looked up in readout.contains list
+        """
+        if readout.kind == DataKind.TRACE:
+            if z_col is not None:
+                print(f"Warning: z_col ignored for TRACE readout '{readout.name}'")
+            return None
+        # IMAGE kind
+        if z_col is None:
+            print(f"Warning: z_col not set for IMAGE readout '{readout.name}', using column 0")
+            return 0
+        if isinstance(z_col, int):
+            return z_col
+        if isinstance(z_col, str):
+            if isinstance(readout.contains, list):
+                try:
+                    return readout.contains.index(z_col)
+                except ValueError:
+                    raise ValueError(
+                        f"z_col='{z_col}' not found in readout.contains={readout.contains}"
+                    )
+            raise ValueError(
+                f"z_col='{z_col}' is a string but readout '{readout.name}' "
+                f"has no contains list"
+            )
+        raise TypeError(f"z_col must be int, str, or None, got {type(z_col)}")
+
+    def _extract_col(self, raw: np.ndarray, z_col, readout) -> np.ndarray:
+        """Extract the relevant column from raw readout data."""
+        col = self._resolve_col(z_col, readout)
+        if col is None:
+            return raw.astype(np.float64)
+        return raw[col].astype(np.float64)
+
+    def _update_live_trace(self, spec_idx, spec, data):
+        """Overwrite the scatter trace with the current readout values.
+
+        Called on every sweep point — always shows the most recent trace.
+        """
+        readout_name = spec.y
+        if not isinstance(readout_name, str) or readout_name not in data:
+            return
+        raw = np.asarray(data[readout_name])
+        if hasattr(self._proc, "context"):
+            readout = self._proc.context.readouts[readout_name]
+            y_vals = self._extract_col(raw, spec.z_col, readout)
+        else:
+            y_vals = (raw[:, spec.z_col] if isinstance(spec.z_col, int) else raw).astype(np.float64)
+        self._fig_dict["data"][self._trace_offsets[spec_idx]]["y"] = y_vals.tolist()
+
+    def _update_trace_heatmap(self, spec_idx, spec, index, data):
+        """Fill one column of the trace heatmap (one sweep step = one column).
+
+        The x-axis position is given by index[0] (the power step index).
+        """
+        if not spec.z or spec.z not in data or len(index) == 0:
+            return
+        raw = np.asarray(data[spec.z])
+        if hasattr(self._proc, "context"):
+            readout = self._proc.context.readouts[spec.z]
+            col_data = self._extract_col(raw, spec.z_col, readout)
+        else:
+            col_data = (raw[:, spec.z_col] if isinstance(spec.z_col, int) else raw).astype(np.float64)
+        state = self._sweep_data[spec_idx][0]
+        state["z"][:, index[0]] = col_data
         self._fig_dict["data"][self._trace_offsets[spec_idx]]["z"] = state["z"].tolist()
 
 

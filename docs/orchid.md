@@ -39,6 +39,7 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [Sweep](#sweep)
   - [Procedure](#procedure)
   - [MonitorProcedure](#monitorprocedure)
+  - [EventLineConfig](#eventlineconfig)
   - [PlotSpec](#plotspec)
   - [LivePlotter](#liveplotter)
   - [WriteMode](#writemode)
@@ -308,24 +309,32 @@ Readouts always use a `get_func` callable. The `kind` determines the data shape:
 
 ```python
 # Scalar readout (single number per point)
-ctx.add_readout("lockin_X", kind="scalar", 
+ctx.add_readout("lockin_X", kind="scalar",
     get_func=lockin_amplifier.read_x, unit="V")
 
 # Trace readout (1D array per point)
-ctx.add_readout("S21", kind="trace", shape=(1601,),
-    get_func=vna.get_trace, unit="dB",
+ctx.add_readout("mag", kind="trace", shape=(1601,),
+    get_func=vna.get_magnitude, unit="dB",
     contains="transmission magnitude")
 
-# Image readout (2D array per point)
+# Image readout (2D array per point — e.g. VNA returning freq + mag + phase)
+# Pass contains as a list of column names so live plotters can select columns by name
+ctx.add_readout("S21", kind="image", shape=(3, 1601),
+    get_func=vna.get_trace, unit=["Hz", "dB", "deg"],
+    contains=["f", "mag", "phase"])
+
+# Simple 2D image
 ctx.add_readout("camera", kind="image", shape=(480, 640),
     get_func=camera.capture, unit="counts")
 ```
 
-| `kind`   | `shape`        | Data per point      |
-|----------|----------------|---------------------|
-| `scalar` | not needed     | single `float`      |
-| `trace`  | `(N,)`         | 1D `ndarray`        |
-| `image`  | `(H, W)`       | 2D `ndarray`        |
+| `kind`   | `shape`        | Data per point      | `contains`                                 |
+|----------|----------------|---------------------|--------------------------------------------|
+| `scalar` | not needed     | single `float`      | optional string description                |
+| `trace`  | `(N,)`         | 1D `ndarray`        | optional string description                |
+| `image`  | `(H, W)`       | 2D `ndarray`        | optional `list[str]` of column names for `W` |
+
+For `IMAGE` readouts, passing `contains` as a `list[str]` (one name per column) lets the `LivePlotter` select a column by name via `z_col` — see [Trace heatmap (VNA)](#trace-heatmap-vna) below.
 
 ---
 
@@ -358,7 +367,7 @@ signal  = ctx["lockin_X"]  # acquires measurement
 
 #### Snapshot
 
-Print a table of all current values:
+Print a table of current parameter values:
 
 ```python
 ctx.snapshot()
@@ -370,14 +379,22 @@ Name      Type    Value    Unit
 --------  ------  -------  ------
 Vgt       param   0.4      V
 fac       param   2500.0   Hz
-lockin_X  scalar  0.0023   V
-S21       trace   [...]    dB
 ```
 
-Print only specific parameters:
+By default `snapshot()` reads only **parameters** (fast: no instrument queries for readouts). Pass `include_readouts=True` to also acquire readout values — useful for a quick sanity check, but slow if readouts involve VNA sweeps or camera captures:
+
+```python
+ctx.snapshot(include_readouts=True)
+# Also prints readout rows:
+# lockin_X  scalar  0.0023   V
+# S21       trace   [...]    dB
+```
+
+Print only specific parameters or readouts by name:
 
 ```python
 ctx.snapshot(["Vgt", "lockin_X"])
+# explicit list overrides include_readouts; reads exactly what is named
 ```
 
 #### Removing instruments, parameters, and readouts
@@ -531,7 +548,13 @@ ctx["Vgt"] = 0.5   # change parameters from the next cell
 data_dir = runner.stop_monitor()  # stop and get data path
 ```
 
-Before each experiment starts, the runner automatically prints a formatted summary of the procedure and saves a `procedure.yaml` to the data directory:
+The runner saves a `procedure.yaml` to the data directory. To also print a formatted summary, pass `print_summary=True`:
+
+```python
+runner.run(proc, print_summary=True)
+```
+
+Output:
 
 ```
 Experiment : gate_sweep
@@ -552,7 +575,7 @@ Settings
   est. duration ~50 s
 ```
 
-You can also call `proc.summary()` manually at any time before running.
+You can also call `proc.summary()` manually at any time without running.
 
 #### Interrupt handling
 
@@ -787,6 +810,73 @@ plotter = LivePlotter([
     PlotSpec(x="fac", y="Vgt", z="lockin_X", colorscale="RdBu_r"),
     PlotSpec(x="fac", y="Vgt", z="lockin_Y", colorscale="Viridis"),
 ])
+```
+
+#### Live trace (VNA / spectrum at each step)
+
+When `x` is a fixed array (e.g. a frequency list), the plot type auto-detects as `live_trace` — a line plot whose y values are **overwritten** at each sweep step to show the most recent trace. Set `update_every="point"` so it refreshes at every measurement, and use `z_col` to pick a column from a multi-column (`IMAGE`) readout:
+
+```python
+flist = np.linspace(4e9, 8e9, 1601)
+
+# VNA trace readout (IMAGE, 3 columns: f, mag, phase)
+ctx.add_readout("S21", kind="image", shape=(3, 1601),
+    get_func=vna.get_trace, contains=["f", "mag", "phase"])
+
+# Live line plot: shows current VNA magnitude, refreshing at each power step
+plotter = LivePlotter([
+    PlotSpec(x=flist, y="S21", z_col="mag", update_every="point"),
+])
+runner.run(proc_power_sweep, plotter=plotter)
+```
+
+For a plain `TRACE` readout (1D array, no columns), `z_col` is not needed:
+
+```python
+ctx.add_readout("mag", kind="trace", shape=(1601,), get_func=vna.get_magnitude)
+
+plotter = LivePlotter([
+    PlotSpec(x=flist, y="mag", update_every="point"),
+])
+```
+
+#### Trace heatmap (VNA)
+
+When `y` is a fixed array (e.g. frequencies) and `x` is a sweep parameter, the plot auto-detects as `trace_heatmap` — a heatmap that **accumulates** one column per sweep step. The x-axis is the sweep parameter (e.g. VNA power) and the y-axis is the fixed array (frequencies). Useful for visualising how a VNA trace evolves with a control parameter:
+
+```python
+flist = np.linspace(4e9, 8e9, 1601)
+
+ctx.add_readout("S21", kind="image", shape=(3, 1601),
+    get_func=vna.get_trace, contains=["f", "mag", "phase"])
+
+# Heatmap: x=power step, y=frequency, color=magnitude
+plotter = LivePlotter([
+    PlotSpec(x="vna_power", y=flist, z="S21", z_col="mag",
+             update_every="point"),
+])
+runner.run(proc_power_sweep, plotter=plotter)
+```
+
+> **Note on axes:** `x` is the sweep parameter — it maps to the *x-axis* of the heatmap (each step adds a new column). `y` is the fixed array — it maps to the *y-axis*. This matches how VNA waterfall plots are normally displayed (frequency on y, power on x, color = magnitude).
+
+**`z_col` selector:**
+
+| `z_col` value | Behaviour |
+|---------------|-----------|
+| `None`        | Use the whole array (valid for `TRACE` readouts) |
+| `int`         | Use that column index (0-based) |
+| `str`         | Look up column by name in `readout.contains` list |
+
+Combine `live_trace` and `trace_heatmap` in one plotter for a complete VNA dashboard:
+
+```python
+plotter = LivePlotter([
+    PlotSpec(x=flist, y="S21", z_col="mag", update_every="point"),   # current trace
+    PlotSpec(x="vna_power", y=flist, z="S21", z_col="mag",
+             update_every="point"),                                    # waterfall
+])
+runner.run(proc_power_sweep, plotter=plotter)
 ```
 
 #### Time-series monitoring
@@ -1106,13 +1196,13 @@ Each event dict contains:
 
 **Live plot integration:**
 
-If a `LivePlotter` is passed with a `PlotSpec(x="_time", ...)`, each parameter change appears as a vertical dashed red line annotated with the parameter name and value — visible in real time as you change parameters:
+If a `LivePlotter` is passed with a `PlotSpec(x="_time", ...)`, each parameter change appears as a vertical dashed line annotated with the parameter name and value — visible in real time as you change parameters:
 
 ```python
 plotter = LivePlotter([PlotSpec(x="_time", y="lockin_X")])
 runner.run_monitor(monitor, plotter=plotter, background=True)
 
-ctx["Vgt"] = 0.5   # red dashed line appears on the plot immediately
+ctx["Vgt"] = 0.5   # dashed marker line appears on the plot immediately
 ```
 
 If no events occurred during the run, no `events.yaml` is written.
@@ -1252,7 +1342,7 @@ Hooks
                            "Re-phases lockin every 10 rows."
 ```
 
-The runner calls `proc.summary()` automatically before every run — the output appears above the progress bar.
+Call `proc.summary()` at any time to print the table. Pass `print_summary=True` to `runner.run()` to print it automatically before each run.
 
 #### After running — read from data directory
 
@@ -1377,14 +1467,14 @@ from orchid import Readout
 
 A read-only measurement channel.
 
-| Argument   | Type                 | Default  | Description                            |
-|------------|----------------------|----------|----------------------------------------|
-| `name`     | `str`                | required | Label (e.g. `"S21"`)                   |
-| `kind`     | `DataKind`           | required | `SCALAR`, `TRACE`, or `IMAGE`          |
-| `get_func` | `callable`           | `None`   | Acquisition function                   |
-| `shape`    | `tuple` or `None`    | `None`   | Required for `TRACE` and `IMAGE`       |
-| `unit`     | `str` or `None`      | `None`   | Physical unit                          |
-| `contains` | `str` or `None`      | `None`   | Description of what is measured        |
+| Argument   | Type                          | Default  | Description                            |
+|------------|-------------------------------|----------|----------------------------------------|
+| `name`     | `str`                         | required | Label (e.g. `"S21"`)                   |
+| `kind`     | `DataKind`                    | required | `SCALAR`, `TRACE`, or `IMAGE`          |
+| `get_func` | `callable`                    | `None`   | Acquisition function                   |
+| `shape`    | `tuple` or `None`             | `None`   | Required for `TRACE` and `IMAGE`       |
+| `unit`     | `str` or `None`               | `None`   | Physical unit                          |
+| `contains` | `str`, `list[str]`, or `None` | `None`   | For `IMAGE` readouts: list of column names (e.g. `["f", "mag", "phase"]`) enabling `z_col` string lookup in `PlotSpec`. For other kinds: plain string description. |
 
 | Method                         | Description           |
 |--------------------------------|-----------------------|
@@ -1440,7 +1530,7 @@ Register a control parameter. `instrument` can be an `InstrumentAdapter` object 
 
 **`add_readout(name, kind, get_func, shape=None, unit=None, contains=None) -> Readout`**
 
-Register a measurement readout. `kind` can be a `DataKind` enum or string (`"scalar"`, `"trace"`, `"image"`).
+Register a measurement readout. `kind` can be a `DataKind` enum or string (`"scalar"`, `"trace"`, `"image"`). For `IMAGE` readouts, pass `contains` as a `list[str]` of column names to enable named `z_col` selection in `PlotSpec`.
 
 **`remove_instrument(name) -> None`**
 
@@ -1458,13 +1548,14 @@ Remove a readout. Raises `KeyError` if not found.
 
 **`ctx[name] = value`** — Set parameter value (calls `parameter.set(value)`).
 
-**`snapshot(names=None) -> None`**
+**`snapshot(names=None, *, include_readouts=False) -> None`**
 
-Print a formatted table of current values using `tabulate`.
+Print a formatted table of current values using `tabulate`. By default reads only parameters (fast). Pass `include_readouts=True` to also acquire readout values.
 
-| Argument | Type               | Default | Description                    |
-|----------|--------------------|---------|--------------------------------|
-| `names`  | `list[str]` or `None` | `None`  | Filter to these names; `None` = all |
+| Argument           | Type                  | Default | Description                                                    |
+|--------------------|-----------------------|---------|----------------------------------------------------------------|
+| `names`            | `list[str]` or `None` | `None`  | Explicit name list; `None` = all (uses `include_readouts` flag) |
+| `include_readouts` | `bool`                | `False` | When `names=None`, also read registered readouts. Ignored when `names` is given. |
 
 ---
 
@@ -1625,21 +1716,26 @@ from orchid import EventLineConfig
 
 Visual properties for parameter-change event markers drawn on time-series plots.
 
-| Argument    | Type  | Default                   | Description                                                      |
-|-------------|-------|---------------------------|------------------------------------------------------------------|
-| `color`     | `str` | `"rgba(255,80,80,0.7)"`   | Line and label color. Any CSS/plotly color string.               |
-| `width`     | `int` | `1`                       | Line width in pixels.                                            |
-| `dash`      | `str` | `"dash"`                  | Line style: `"solid"`, `"dot"`, `"dash"`, `"longdash"`, `"dashdot"`. |
-| `font_size` | `int` | `9`                       | Label font size in points.                                       |
+| Argument      | Type  | Default                    | Description                                                         |
+|---------------|-------|----------------------------|---------------------------------------------------------------------|
+| `color`       | `str` | `"#444444"`                | Line and label font color. Any CSS/plotly color string.             |
+| `width`       | `int` | `2`                        | Line width in pixels.                                               |
+| `dash`        | `str` | `"dash"`                   | Line style: `"solid"`, `"dot"`, `"dash"`, `"longdash"`, `"dashdot"`. |
+| `font_size`   | `int` | `15`                       | Label font size in points.                                          |
+| `bgcolor`     | `str` | `"rgba(255,255,255,0.85)"` | Label box background color. Use `rgba(r,g,b,a)` for transparency.  |
+| `bordercolor` | `str` | `"#000000"`                | Label box border color.                                             |
+| `borderwidth` | `int` | `1`                        | Label box border width in pixels.                                   |
+| `borderpad`   | `int` | `3`                        | Padding in pixels between the label text and the box border.        |
+
+Labels are rotated 90° and centered vertically on the event line.
 
 ```python
 plotter = LivePlotter(
     [PlotSpec(x="_time", y="lockin_X")],
     event_line=EventLineConfig(
-        color="rgba(0,150,255,0.8)",
-        width=2,
+        color="#2255cc",
         dash="dot",
-        font_size=11,
+        bgcolor="rgba(255,255,255,0.0)",  # transparent box (no box)
     ),
 )
 ```
@@ -1654,15 +1750,25 @@ from orchid import PlotSpec
 
 Describes one subplot in a `LivePlotter`.
 
-| Argument      | Type                    | Default   | Description                                      |
-|---------------|-------------------------|-----------|--------------------------------------------------|
-| `x`           | `str`                   | required  | Line: sweep parameter name **or readout name** for x-axis. Heatmap: x-axis sweep param. Monitor: `"_time"` or readout name. |
-| `y`           | `str` or `list[str]`    | required  | Line: readout name(s) for y-axis — pass a list to overlay multiple traces in one subplot. Heatmap: y-axis sweep param (string only). |
-| `z`           | `str` or `None`         | `None`    | Heatmap only: readout name for color values. Required for heatmaps. |
-| `plot_type`   | `str`                   | `"auto"`  | `"line"`, `"heatmap"`, or `"auto"` (infer from ndim) |
-| `update_every`| `str`                   | `"sweep"` | `"point"`, `"sweep"`, or `"plane"`               |
-| `update_func` | `callable` or `None`    | `None`    | Custom `(fig_dict, index, data) -> None`         |
-| `colorscale`  | `str`, `list`, or `None`| `None`    | Heatmap only: Plotly colorscale name (e.g. `"Inferno"`, `"RdBu_r"`) or a custom scale list. `None` uses the active template default. |
+| Argument      | Type                               | Default   | Description                                      |
+|---------------|------------------------------------|-----------|--------------------------------------------------|
+| `x`           | `str` or `array-like`              | required  | **str**: sweep parameter name, readout name, or `"_time"` (monitor). **array**: fixed axis values (e.g. frequency list) — triggers `live_trace` auto-detection. |
+| `y`           | `str`, `list[str]`, or `array-like`| required  | **str**: readout name. **list[str]**: multiple readout names overlaid on one subplot. **array**: fixed axis values (e.g. frequency list) — triggers `trace_heatmap` auto-detection. Heatmap: outer sweep parameter name (string). |
+| `z`           | `str` or `None`                    | `None`    | Readout name for color values. Required for `"heatmap"` and `"trace_heatmap"`. |
+| `z_col`       | `int`, `str`, or `None`            | `None`    | Column selector for `IMAGE` or `TRACE` readouts used as `z` (or `y` for `live_trace`). `None` = use whole array (valid for `TRACE`). `int` = column index. `str` = column name looked up in `readout.contains`. |
+| `plot_type`   | `str`                              | `"auto"`  | `"line"`, `"heatmap"`, `"live_trace"`, `"trace_heatmap"`, or `"auto"` (infer from types of `x` and `y`). |
+| `update_every`| `str`                              | `"sweep"` | `"point"`, `"sweep"`, or `"plane"`               |
+| `update_func` | `callable` or `None`               | `None`    | Custom `(fig_dict, index, data) -> None`         |
+| `colorscale`  | `str`, `list`, or `None`           | `None`    | Plotly colorscale name (heatmaps only). `None` uses the active template default. |
+
+**Auto-detection rules** (when `plot_type="auto"`):
+
+| `x`    | `y`    | procedure ndim | resolved type    |
+|--------|--------|----------------|------------------|
+| str    | str    | 1              | `line`           |
+| str    | str    | ≥ 2            | `heatmap`        |
+| array  | str    | any            | `live_trace`     |
+| str    | array  | any            | `trace_heatmap`  |
 
 ---
 
@@ -1683,6 +1789,7 @@ Live plotting via a Dash server in a separate browser window.
 | `open_browser`    | `bool`                     | `True`               | Auto-open browser on start           |
 | `update_interval` | `int`                      | `500`                | Dash polling interval in ms          |
 | `event_line`      | `EventLineConfig` or `None`| `EventLineConfig()`  | Style for parameter-change markers   |
+| `max_display_pts` | `int`                      | `5000`               | Rolling window size for monitor line plots. For sweep plots the buffer is sized exactly to the inner sweep length. |
 
 #### Lifecycle methods (called by the runner)
 
@@ -1774,23 +1881,33 @@ Executes procedures and manages data flow to zarro. Internally delegates sweep e
 
 | Method / Property                       | Description                              |
 |-----------------------------------------|------------------------------------------|
-| `run(procedure, plotter=None, return_path=False) -> Path or None`  | Run sweep experiment (sync)   |
-| `await arun(procedure, plotter=None) -> Path` | Run sweep experiment (async)               |
-| `run_monitor(procedure, plotter=None, background=False, return_path=False) -> Path or None` | Run time-series monitor |
-| `await arun_monitor(procedure, plotter=None) -> Path` | Run monitor (async)       |
+| `run(procedure, plotter=None, print_summary=False, return_path=False) -> Path or None` | Run sweep experiment (sync) |
+| `await arun(procedure, plotter=None, print_summary=False) -> Path` | Run sweep experiment (async) |
+| `run_monitor(procedure, plotter=None, background=False, print_summary=False, return_path=False) -> Path or None` | Run time-series monitor |
+| `await arun_monitor(procedure, plotter=None, print_summary=False) -> Path` | Run monitor (async) |
 | `stop_monitor() -> Path`                | Stop a background monitor and return data path |
 | `is_monitoring` *(property)*            | `True` if a background monitor is currently running |
 
 All methods return the `Path` to the output data directory.
 
+**`run` / `arun` shared parameters:**
+
+| Argument        | Type                    | Default | Description                                   |
+|-----------------|-------------------------|---------|-----------------------------------------------|
+| `procedure`     | `Procedure`             | required| The sweep procedure                           |
+| `plotter`       | `LivePlotter` or `None` | `None`  | Live plotter                                  |
+| `print_summary` | `bool`                  | `False` | If `True`, print the procedure summary table before running. |
+| `return_path`   | `bool`                  | `False` | If `True`, return the `Path` to the saved data directory (`run()` only). |
+
 **`run_monitor` parameters:**
 
-| Argument      | Type   | Default | Description                                    |
-|---------------|--------|---------|------------------------------------------------|
-| `procedure`   | `MonitorProcedure` | required | The monitoring procedure        |
-| `plotter`     | `LivePlotter` or `None` | `None` | Live plotter                  |
-| `background`  | `bool` | `False` | If True, run in background thread and return immediately. Use `ctx["Vgt"] = 0.5` to change parameters, `runner.stop_monitor()` to stop. |
-| `return_path` | `bool` | `False` | If True, return the `Path` to the saved data directory. Default is False (returns `None`). In background mode, always returns `None`; use `stop_monitor()` to get the path. |
+| Argument        | Type                    | Default | Description                                    |
+|-----------------|-------------------------|---------|------------------------------------------------|
+| `procedure`     | `MonitorProcedure`      | required| The monitoring procedure                       |
+| `plotter`       | `LivePlotter` or `None` | `None`  | Live plotter                                   |
+| `background`    | `bool`                  | `False` | If `True`, run in background thread and return immediately. Use `ctx["Vgt"] = 0.5` to change parameters, `runner.stop_monitor()` to stop. |
+| `print_summary` | `bool`                  | `False` | If `True`, print the procedure summary table before running. |
+| `return_path`   | `bool`                  | `False` | If `True`, return the `Path` to the saved data directory. In background mode, always returns `None`; use `stop_monitor()` to get the path. |
 
 **Interrupt handling:** `Ctrl+C` cleanly stops any running experiment, saves collected data with `status: "interrupted"` in metadata, and prints a single-line message. No tracebacks in Jupyter.
 
