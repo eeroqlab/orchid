@@ -1,4 +1,4 @@
-"""ExperimentContext — the lab bench configuration holding instruments, parameters, and readouts."""
+"""Bench — the lab bench configuration holding instruments, controllers, and readouts."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .instrument import InstrumentAdapter
-from .parameter import DataKind, Parameter, Readout
+from .controller import DataKind, Controller, Readout
 
 
 @dataclass
-class ExperimentContext:
-    """Container for all instruments, parameters, and readouts.
+class Bench:
+    """Container for all instruments, controllers, and readouts.
 
     Acts as the "lab bench" configuration passed to procedures.
 
@@ -29,7 +29,7 @@ class ExperimentContext:
     metadata: dict = field(default_factory=dict)
 
     instruments: dict[str, InstrumentAdapter] = field(default_factory=dict, init=False)
-    parameters: dict[str, Parameter] = field(default_factory=dict, init=False)
+    controllers: dict[str, Controller] = field(default_factory=dict, init=False)
     readouts: dict[str, Readout] = field(default_factory=dict, init=False)
 
     # Event log — active only during run_monitor(); None when idle
@@ -67,7 +67,7 @@ class ExperimentContext:
         self.instruments[name] = adapter
         return adapter
 
-    def add_parameter(
+    def add_controller(
         self,
         name: str,
         instrument: InstrumentAdapter | str | None = None,
@@ -75,7 +75,7 @@ class ExperimentContext:
         get_func=None,
         set_func=None,
         unit: str | None = None,
-    ) -> Parameter:
+    ) -> Controller:
         """Register a control parameter.
 
         Parameters
@@ -93,7 +93,7 @@ class ExperimentContext:
         """
         if isinstance(instrument, str):
             instrument = self.instruments[instrument]
-        param = Parameter(
+        ctrl = Controller(
             name=name,
             instrument=instrument,
             attr=attr,
@@ -101,8 +101,8 @@ class ExperimentContext:
             set_func=set_func,
             unit=unit,
         )
-        self.parameters[name] = param
-        return param
+        self.controllers[name] = ctrl
+        return ctrl
 
     def add_readout(
         self,
@@ -154,27 +154,27 @@ class ExperimentContext:
         if name not in self.instruments:
             raise KeyError(f"No instrument named {name!r}")
         adapter = self.instruments.pop(name)
-        # Remove parameters that reference this instrument
+        # Remove controllers that reference this instrument
         to_remove = [
-            pname for pname, p in self.parameters.items()
+            pname for pname, p in self.controllers.items()
             if p.instrument is adapter
         ]
         for pname in to_remove:
-            del self.parameters[pname]
+            del self.controllers[pname]
         if to_remove:
-            print(f"Removed dependent parameters: {to_remove}")
+            print(f"Removed dependent controllers: {to_remove}")
 
-    def remove_parameter(self, name: str) -> None:
-        """Remove a parameter.
+    def remove_controller(self, name: str) -> None:
+        """Remove a controller.
 
         Parameters
         ----------
         name : str
-            Name of the parameter to remove.
+            Name of the controller to remove.
         """
-        if name not in self.parameters:
-            raise KeyError(f"No parameter named {name!r}")
-        del self.parameters[name]
+        if name not in self.controllers:
+            raise KeyError(f"No controller named {name!r}")
+        del self.controllers[name]
 
     def remove_readout(self, name: str) -> None:
         """Remove a readout.
@@ -189,28 +189,28 @@ class ExperimentContext:
         del self.readouts[name]
 
     def __getitem__(self, name: str):
-        """Get current value of a parameter or readout.
+        """Get current value of a controller or readout.
 
         Usage::
 
-            ctx["Vgt"]       # reads voltage from instrument
-            ctx["lockin_X"]  # reads lockin X channel
+            bench["Vgt"]       # reads voltage from instrument
+            bench["lockin_X"]  # reads lockin X channel
         """
-        if name in self.parameters:
-            return self.parameters[name].get()
+        if name in self.controllers:
+            return self.controllers[name].get()
         if name in self.readouts:
             return self.readouts[name].read()
-        raise KeyError(f"No parameter or readout named {name!r}")
+        raise KeyError(f"No controller or readout named {name!r}")
 
     def __setitem__(self, name: str, value) -> None:
-        """Set a parameter value.
+        """Set a controller value.
 
         Usage::
 
-            ctx["Vgt"] = 0.4   # sets voltage on instrument
+            bench["Vgt"] = 0.4   # sets voltage on instrument
         """
-        if name in self.parameters:
-            self.parameters[name].set(value)
+        if name in self.controllers:
+            self.controllers[name].set(value)
             if self._event_log is not None:
                 entry = {
                     "time": _time.time(),
@@ -221,10 +221,10 @@ class ExperimentContext:
                 if self._event_callback is not None:
                     self._event_callback(entry)
         else:
-            raise KeyError(f"No parameter named {name!r}")
+            raise KeyError(f"No controller named {name!r}")
 
     def _start_event_log(self, on_event: Callable | None = None) -> None:
-        """Start recording parameter change events.
+        """Start recording controller change events.
 
         Called by ExperimentRunner at the start of a monitor run.
         """
@@ -249,15 +249,15 @@ class ExperimentContext:
     ) -> None:
         """Print a table of current parameter and readout values.
 
-        By default only parameters are read — readouts can involve slow
+        By default only controllers are read — readouts can involve slow
         instrument acquisitions (lock-in time constants, VNA sweeps, etc.)
         and are excluded unless explicitly requested.
 
         Parameters
         ----------
         names : list of str, optional
-            If given, read exactly these parameters/readouts (by name).
-            If None, read all parameters and, if ``include_readouts=True``,
+            If given, read exactly these controllers/readouts (by name).
+            If None, read all controllers and, if ``include_readouts=True``,
             all readouts too.
         include_readouts : bool
             If True, include all registered readouts when ``names`` is None.
@@ -266,14 +266,14 @@ class ExperimentContext:
         from tabulate import tabulate as _tabulate
 
         if names is None:
-            names = list(self.parameters.keys())
+            names = list(self.controllers.keys())
             if include_readouts:
                 names += list(self.readouts.keys())
 
         rows = []
         for name in names:
-            if name in self.parameters:
-                p = self.parameters[name]
+            if name in self.controllers:
+                p = self.controllers[name]
                 try:
                     val = p.get()
                 except Exception as e:
@@ -299,8 +299,8 @@ class ExperimentContext:
 
     def __repr__(self) -> str:
         return (
-            f"ExperimentContext("
+            f"Bench("
             f"{len(self.instruments)} instruments, "
-            f"{len(self.parameters)} parameters, "
+            f"{len(self.controllers)} controllers, "
             f"{len(self.readouts)} readouts)"
         )

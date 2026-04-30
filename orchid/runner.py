@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from .parameter import DataKind
+from .controller import DataKind
 from .procedure import ErrorPolicy, MonitorProcedure, MultiSweep, Procedure, WriteMode
 
 # Zarro imports — use absolute import from the sibling package
@@ -76,20 +76,20 @@ def _build_schema(proc: Procedure) -> MeasurementSchema:
         if isinstance(sweep, MultiSweep):
             cvs = [
                 ControlVar(name=p.name, values=v, unit=p.unit)
-                for p, v in zip(sweep.parameters, sweep.all_values)
+                for p, v in zip(sweep.controllers, sweep.all_values)
             ]
             control_axes.append(AxisSpecs(cvs))
         else:
             cv = ControlVar(
-                name=sweep.parameter.name,
+                name=sweep.controller.name,
                 values=sweep.values,
-                unit=sweep.parameter.unit,
+                unit=sweep.controller.unit,
             )
             control_axes.append(AxisSpecs([cv]))
 
     readout_specs = []
     for rname in proc.readouts:
-        rd = proc.context.readouts[rname]
+        rd = proc.bench.readouts[rname]
         readout_specs.append(
             ReadoutSpecs(
                 name=rd.name,
@@ -163,13 +163,17 @@ class WriteStrategy(abc.ABC):
         """
         self._current_indices[axis] = i
         self._current_reversed_map[axis] = reversed_
+        # Full index up to and including this axis — used by limit logging
+        full_index = tuple(self._current_indices.get(ax, 0) for ax in range(axis + 1))
         if isinstance(sweep, MultiSweep):
-            for param, vals in zip(sweep.parameters, sweep.all_values):
+            for ctrl, vals in zip(sweep.controllers, sweep.all_values):
                 actual = vals[::-1] if reversed_ else vals
-                await param.aset(actual[i])
+                ctrl._sweep_index = full_index
+                await ctrl.aset(actual[i])
         else:
             vals = sweep.values[::-1] if reversed_ else sweep.values
-            await sweep.parameter.aset(vals[i])
+            sweep.controller._sweep_index = full_index
+            await sweep.controller.aset(vals[i])
 
     def _sweep_current_values(self) -> dict:
         """Return {param_name: current_value} for all sweep parameters.
@@ -182,12 +186,12 @@ class WriteStrategy(abc.ABC):
             i = self._current_indices.get(axis, 0)
             rev = self._current_reversed_map.get(axis, False)
             if isinstance(sweep, MultiSweep):
-                for param, vals in zip(sweep.parameters, sweep.all_values):
+                for ctrl, vals in zip(sweep.controllers, sweep.all_values):
                     actual = vals[::-1] if rev else vals
-                    result[param.name] = float(actual[i])
+                    result[ctrl.name] = float(actual[i])
             else:
                 vals = sweep.values[::-1] if rev else sweep.values
-                result[sweep.parameter.name] = float(vals[i])
+                result[sweep.controller.name] = float(vals[i])
         return result
 
     async def _safe_read(self, readout):
@@ -218,7 +222,7 @@ class WriteStrategy(abc.ABC):
         """Pre-allocate numpy buffers for all readouts."""
         buffers = {}
         for rname in self.proc.readouts:
-            rd = self.proc.context.readouts[rname]
+            rd = self.proc.bench.readouts[rname]
             trailing = rd.shape if rd.kind != DataKind.SCALAR else ()
             buffers[rname] = np.empty(shape + trailing, dtype=np.float32)
         return buffers
@@ -231,7 +235,7 @@ class WriteStrategy(abc.ABC):
 
         for rname in self.proc.readouts:
             buffers[rname][index] = await self._safe_read(
-                self.proc.context.readouts[rname]
+                self.proc.bench.readouts[rname]
             )
 
         await _acall_hook(self.proc.after_point, index)
@@ -250,10 +254,10 @@ class WriteStrategy(abc.ABC):
             return
         sweep_values = self._sweep_current_values()
         if isinstance(inner_sweep, MultiSweep):
-            for param, vals in zip(inner_sweep.parameters, inner_sweep.all_values):
-                sweep_values[param.name] = vals
+            for ctrl, vals in zip(inner_sweep.controllers, inner_sweep.all_values):
+                sweep_values[ctrl.name] = vals
         else:
-            sweep_values[inner_sweep.parameter.name] = inner_sweep.values
+            sweep_values[inner_sweep.controller.name] = inner_sweep.values
         self.plotter.update_sweep(outer_index, buffers, sweep_values)
 
     def _notify_plotter_plane(self, outer_index, buffers):
@@ -293,7 +297,7 @@ class PointwiseStrategy(WriteStrategy):
             data = {}
             for rname in self.proc.readouts:
                 data[rname] = await self._safe_read(
-                    self.proc.context.readouts[rname]
+                    self.proc.bench.readouts[rname]
                 )
 
             self.writer.write_point(index, data)
@@ -344,7 +348,7 @@ class SweepwiseStrategy(WriteStrategy):
             point_data = {}
             for rname in self.proc.readouts:
                 point_data[rname] = await self._safe_read(
-                    self.proc.context.readouts[rname]
+                    self.proc.bench.readouts[rname]
                 )
                 buffers[rname][i] = point_data[rname]
 
@@ -408,7 +412,7 @@ class PlanewiseStrategy(WriteStrategy):
                 point_data = {}
                 for rname in self.proc.readouts:
                     point_data[rname] = await self._safe_read(
-                        self.proc.context.readouts[rname]
+                        self.proc.bench.readouts[rname]
                     )
                     buffers[rname][i, j] = point_data[rname]
 
@@ -447,7 +451,7 @@ class AllStrategy(WriteStrategy):
             point_data = {}
             for rname in self.proc.readouts:
                 point_data[rname] = await self._safe_read(
-                    self.proc.context.readouts[rname]
+                    self.proc.bench.readouts[rname]
                 )
                 buffers[rname][index] = point_data[rname]
 
@@ -507,7 +511,7 @@ class ExperimentRunner:
 
     def _get_data_dir(self, proc: Procedure | MonitorProcedure) -> Path:
         """Determine the output directory for this run."""
-        root = Path(proc.context.data_root)
+        root = Path(proc.bench.data_root)
         if self.use_experiment_id:
             eid = ExperimentID(root)
             return eid.next_dir()
@@ -561,7 +565,7 @@ class ExperimentRunner:
         if s["pbar"]:
             s["pbar"].close()
         if s["writer"] and s["data_dir"]:
-            meta = {**s["proc"].context.metadata, **s["proc"].metadata, "status": "interrupted"}
+            meta = {**s["proc"].bench.metadata, **s["proc"].metadata, "status": "interrupted"}
             try:
                 s["writer"].overwrite = True
                 s["writer"].write_metadata(meta=meta)
@@ -580,6 +584,31 @@ class ExperimentRunner:
             print(f"\nExperiment '{name}' interrupted.")
         return data_dir
 
+    # ── Limit-log helpers ─────────────────────────────────────────────
+
+    @staticmethod
+    def _reset_limit_logs(proc) -> None:
+        """Clear limit logs on all controllers before a run."""
+        for ctrl in proc.bench.controllers.values():
+            ctrl.clear_limit_log()
+
+    @staticmethod
+    def _save_limit_log(proc, data_dir: Path) -> None:
+        """Collect limit-log entries from all controllers and write limit_log.yaml."""
+        entries = []
+        for ctrl in proc.bench.controllers.values():
+            for entry in ctrl.limit_log:
+                entries.append({
+                    "controller": ctrl.name,
+                    "index": list(entry.index),
+                    "requested": entry.requested,
+                    "clamped": entry.clamped,
+                })
+        if entries:
+            (data_dir / "limit_log.yaml").write_text(
+                yaml.safe_dump(entries, sort_keys=False, allow_unicode=True)
+            )
+
     async def arun(self, proc: Procedure, plotter=None,
                    print_summary: bool = False) -> Path:
         """Run a sweep experiment asynchronously."""
@@ -590,6 +619,8 @@ class ExperimentRunner:
 
         if print_summary:
             proc.summary()
+
+        self._reset_limit_logs(proc)
 
         data_dir = self._get_data_dir(proc)
         schema = _build_schema(proc)
@@ -631,7 +662,7 @@ class ExperimentRunner:
             # Let it propagate — run() handles cleanup via _handle_interrupt()
             raise
         except Exception:
-            meta = {**proc.context.metadata, **proc.metadata, "status": "error"}
+            meta = {**proc.bench.metadata, **proc.metadata, "status": "error"}
             writer.overwrite = True
             writer.write_metadata(meta=meta)
             if pbar:
@@ -641,11 +672,13 @@ class ExperimentRunner:
         if pbar:
             pbar.close()
 
-        meta = {**proc.context.metadata, **proc.metadata, "status": "completed"}
+        meta = {**proc.bench.metadata, **proc.metadata, "status": "completed"}
         writer.overwrite = True
         writer.write_metadata(meta=meta)
 
         await _acall_hook(proc.after_experiment)
+
+        self._save_limit_log(proc, data_dir)
 
         if plotter is not None:
             plotter.stop()
@@ -669,7 +702,7 @@ class ExperimentRunner:
             Live plotter for real-time visualization.
         background : bool
             If True, run in a background thread and return immediately.
-            Use ``ctx["Vgt"] = 0.5`` in the next cell to change parameters
+            Use ``bench["Vgt"] = 0.5`` in the next cell to change parameters
             while monitoring. Call ``runner.stop_monitor()`` to stop.
         print_summary : bool
             If True, print the procedure summary table before running.
@@ -755,11 +788,13 @@ class ExperimentRunner:
         if print_summary:
             proc.summary()
 
+        self._reset_limit_logs(proc)
+
         data_dir = self._get_data_dir(proc)
 
         readout_shapes = {}
         for rname in proc.readouts:
-            rd = proc.context.readouts[rname]
+            rd = proc.bench.readouts[rname]
             if rd.kind == DataKind.SCALAR:
                 readout_shapes[rname] = ()
             else:
@@ -789,12 +824,12 @@ class ExperimentRunner:
         start_time = time.time()
         sample_idx = 0
 
-        # Register event callback — fires on every ctx["param"] = value
+        # Register event callback — fires on every bench["param"] = value
         def _on_event(entry):
             if plotter is not None:
                 plotter.notify_event(entry["time"], entry["param"], entry["value"])
 
-        proc.context._start_event_log(on_event=_on_event)
+        proc.bench._start_event_log(on_event=_on_event)
 
         interrupted = False
         try:
@@ -813,7 +848,7 @@ class ExperimentRunner:
                 # instrument hiccup doesn't abort a long-running monitor session.
                 data = {}
                 for rname in proc.readouts:
-                    readout = proc.context.readouts[rname]
+                    readout = proc.bench.readouts[rname]
                     try:
                         data[rname] = await readout.aread()
                     except Exception as e:
@@ -843,10 +878,10 @@ class ExperimentRunner:
         except KeyboardInterrupt:
             interrupted = True
         finally:
-            event_log = proc.context._stop_event_log()
+            event_log = proc.bench._stop_event_log()
 
         status = "interrupted" if interrupted else "completed"
-        meta = {**proc.context.metadata, **proc.metadata, "status": status}
+        meta = {**proc.bench.metadata, **proc.metadata, "status": status}
         writer.close(meta=meta)
 
         # Write events.yaml if any parameter changes were recorded
@@ -858,6 +893,8 @@ class ExperimentRunner:
             )
 
         await _acall_hook(proc.after_experiment)
+
+        self._save_limit_log(proc, data_dir)
 
         if plotter is not None:
             plotter.finalize()

@@ -164,6 +164,32 @@ def update_metadata(data_dir: str | Path, **kwargs) -> dict:
     return meta
 
 
+def read_limit_log(data_dir: str | Path) -> list[dict]:
+    """Read controller limit violations recorded during an experiment.
+
+    Returns a list of dicts, each with keys:
+    ``controller`` (name), ``index`` (sweep index list), ``requested``
+    (value that was asked for), ``clamped`` (value that was applied).
+    Returns an empty list if no violations occurred or ``limit_log.yaml``
+    does not exist.
+
+    Parameters
+    ----------
+    data_dir : str or Path
+        Path to the experiment directory (containing limit_log.yaml).
+
+    Examples
+    --------
+    >>> entries = read_limit_log("./data/0005")
+    >>> for e in entries:
+    ...     print(f"{e['controller']}[{e['index']}]: {e['requested']} → {e['clamped']}")
+    """
+    path = Path(data_dir) / "limit_log.yaml"
+    if not path.exists():
+        return []
+    return yaml.safe_load(path.read_text()) or []
+
+
 def read_events(data_dir: str | Path) -> list[dict]:
     """Read parameter change events recorded during a monitor run.
 

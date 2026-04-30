@@ -3,7 +3,7 @@
 **Orchestrating Instruments & Data** — a Python package for lab experiment control.
 
 Orchid provides a clean pipeline for running automated lab experiments:  
-**Instruments** &rarr; **Parameters & Readouts** &rarr; **ExperimentContext** &rarr; **Procedure** &rarr; **Runner** &rarr; **Data (zarro)**
+**Instruments** &rarr; **Controllers & Readouts** &rarr; **Bench** &rarr; **Procedure** &rarr; **Runner** &rarr; **Data (zarro)**
 
 ---
 
@@ -13,8 +13,8 @@ Orchid provides a clean pipeline for running automated lab experiments:
 - [Quick Start](#quick-start)
 - [Tutorial](#tutorial)
   - [Step 1: Instruments](#step-1-instruments)
-  - [Step 2: Parameters & Readouts](#step-2-parameters--readouts)
-  - [Step 3: ExperimentContext](#step-3-experimentcontext)
+  - [Step 2: Controllers & Readouts](#step-2-controllers--readouts)
+  - [Step 3: Bench](#step-3-bench)
   - [Step 4: Procedures](#step-4-procedures)
   - [Step 5: Running Experiments](#step-5-running-experiments)
   - [Step 6: Reading Data Back](#step-6-reading-data-back)
@@ -25,6 +25,8 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [2D Sweep with Snake Scan](#2d-sweep-with-snake-scan)
   - [Hysteresis (Forward + Backward)](#hysteresis-forward--backward)
   - [Time-Series Monitoring](#time-series-monitoring)
+  - [Controller Limits](#controller-limits)
+  - [Controller Event Logging](#controller-event-logging)
   - [Background Monitoring](#background-monitoring)
   - [Custom Hooks](#custom-hooks)
   - [Mixed Readouts (Scalar + Trace)](#mixed-readouts-scalar--trace)
@@ -32,11 +34,13 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [Inspecting a Procedure](#inspecting-a-procedure)
 - [API Reference](#api-reference)
   - [InstrumentAdapter](#instrumentadapter)
-  - [Parameter](#parameter)
+  - [Controller](#controller)
+  - [LimitPolicy](#limitpolicy)
   - [Readout](#readout)
   - [DataKind](#datakind)
-  - [ExperimentContext](#experimentcontext)
+  - [Bench](#bench)
   - [Sweep](#sweep)
+  - [MultiSweep](#multisweep)
   - [Procedure](#procedure)
   - [MonitorProcedure](#monitorprocedure)
   - [EventLineConfig](#eventlineconfig)
@@ -88,24 +92,24 @@ class VoltageSource:
 
 vs = VoltageSource()
 
-# Set up context
-ctx = ExperimentContext(data_root="./data", metadata={"sample": "chip_A1"})
-ctx.add_instrument("vs", vs)
-ctx.add_parameter("Vgt", instrument="vs", attr="voltage", unit="V")
-ctx.add_readout("signal", kind="scalar", get_func=lambda: vs.voltage ** 2, unit="V")
+# Set up bench
+bench = Bench(data_root="./data", metadata={"sample": "chip_A1"})
+bench.add_instrument("vs", vs)
+bench.add_controller("Vgt", instrument="vs", attr="voltage", unit="V")
+bench.add_readout("signal", kind="scalar", get_func=lambda: vs.voltage ** 2, unit="V")
 
 # Set/get values (pymeasure style)
-ctx["Vgt"] = 0.5
-print(ctx["Vgt"])        # 0.5
-print(ctx["signal"])     # 0.25
+bench["Vgt"] = 0.5
+print(bench["Vgt"])        # 0.5
+print(bench["signal"])     # 0.25
 
 # Snapshot
-ctx.snapshot()
+bench.snapshot()
 
 # Define and run a 1D sweep
 proc = Procedure(
     name="gate_sweep",
-    context=ctx,
+    bench=bench,
     sweeps=[Sweep("Vgt", np.linspace(0, 1, 101))],
     readouts=["signal"],
 )
@@ -118,7 +122,7 @@ data_dir = ExperimentRunner().run(proc)
 
 ### Step 1: Instruments
 
-Orchid supports three instrument backends: **pymeasure**, **qcodes**, and **custom** (any Python object). Register instruments through `ExperimentContext.add_instrument()` or create adapters directly.
+Orchid supports three instrument backends: **pymeasure**, **qcodes**, and **custom** (any Python object). Register instruments through `Bench.add_instrument()` or create adapters directly.
 
 #### Custom instruments (any Python object)
 
@@ -138,7 +142,7 @@ class MyKeithley:
         self._voltage = v
 
 keithley = MyKeithley()
-ctx.add_instrument("keithley", keithley)
+bench.add_instrument("keithley", keithley)
 # backend is auto-detected as "custom"
 ```
 
@@ -148,7 +152,7 @@ ctx.add_instrument("keithley", keithley)
 from pymeasure.instruments.keithley import Keithley2400
 
 keithley = Keithley2400("GPIB::24")
-ctx.add_instrument("keithley", keithley, backend="pymeasure")
+bench.add_instrument("keithley", keithley, backend="pymeasure")
 # get/set uses property access: keithley.source_voltage
 ```
 
@@ -158,7 +162,7 @@ ctx.add_instrument("keithley", keithley, backend="pymeasure")
 from qcodes.instrument_drivers.stanford_research import SR830
 
 lockin = SR830("lockin", "GPIB::8")
-ctx.add_instrument("lockin", lockin, backend="qcodes")
+bench.add_instrument("lockin", lockin, backend="qcodes")
 # get/set uses qcodes Parameter API: lockin.frequency.get() / .set()
 ```
 
@@ -167,7 +171,7 @@ ctx.add_instrument("lockin", lockin, backend="qcodes")
 When `backend="auto"` (the default), orchid inspects the class MRO to detect pymeasure or qcodes instruments automatically:
 
 ```python
-ctx.add_instrument("lockin", lockin)  # auto-detects qcodes
+bench.add_instrument("lockin", lockin)  # auto-detects qcodes
 ```
 
 #### Direct adapter creation
@@ -184,14 +188,14 @@ adapter = InstrumentAdapter.auto("lockin", lockin)
 
 ---
 
-### Step 2: Parameters & Readouts
+### Step 2: Controllers & Readouts
 
-**Parameters** are named controls that map to instrument channels. They support both get and set.  
+**Controllers** are named controls that map to instrument channels. They support both get and set.  
 **Readouts** are read-only measurement channels that acquire data.
 
-There are several ways to define a parameter depending on your instrument driver.
+There are several ways to define a controller depending on your instrument driver.
 
-#### Parameters for pymeasure instruments
+#### Controllers for pymeasure instruments
 
 pymeasure instruments expose parameters as Python properties. Pass the property name as `attr`:
 
@@ -202,23 +206,23 @@ from pymeasure.instruments.srs import SR830
 keithley = Keithley2400("GPIB::24")
 lockin = SR830("GPIB::8")
 
-ctx.add_instrument("keithley", keithley)
-ctx.add_instrument("lockin", lockin)
+bench.add_instrument("keithley", keithley)
+bench.add_instrument("lockin", lockin)
 
 # attr matches the pymeasure property name
 # internally uses: keithley.source_voltage / keithley.source_voltage = val
-ctx.add_parameter("Vgt", instrument="keithley", attr="source_voltage", unit="V")
-ctx.add_parameter("I_compliance", instrument="keithley", attr="compliance_current", unit="A")
+bench.add_controller("Vgt", instrument="keithley", attr="source_voltage", unit="V")
+bench.add_controller("I_compliance", instrument="keithley", attr="compliance_current", unit="A")
 
 # lockin frequency
 # internally uses: lockin.frequency / lockin.frequency = val
-ctx.add_parameter("fac", instrument="lockin", attr="frequency", unit="Hz")
-ctx.add_parameter("sensitivity", instrument="lockin", attr="sensitivity", unit="V")
+bench.add_controller("fac", instrument="lockin", attr="frequency", unit="Hz")
+bench.add_controller("sensitivity", instrument="lockin", attr="sensitivity", unit="V")
 ```
 
 To find available property names, check the pymeasure docs or use `dir(instrument)`.
 
-#### Parameters for qcodes instruments
+#### Controllers for qcodes instruments
 
 qcodes instruments expose parameters as `qcodes.Parameter` objects with `.get()` / `.set()` methods. The adapter handles this automatically:
 
@@ -229,24 +233,24 @@ from qcodes.instrument_drivers.yokogawa import GS200
 yoko = GS200("yoko", "GPIB::1")
 lockin = SR830("lockin", "GPIB::8")
 
-ctx.add_instrument("yoko", yoko)
-ctx.add_instrument("lockin", lockin)
+bench.add_instrument("yoko", yoko)
+bench.add_instrument("lockin", lockin)
 
 # attr matches the qcodes parameter name
 # internally uses: yoko.voltage.get() / yoko.voltage.set(val)
-ctx.add_parameter("Vgt", instrument="yoko", attr="voltage", unit="V")
-ctx.add_parameter("I_range", instrument="yoko", attr="current_range", unit="A")
+bench.add_controller("Vgt", instrument="yoko", attr="voltage", unit="V")
+bench.add_controller("I_range", instrument="yoko", attr="current_range", unit="A")
 
 # internally uses: lockin.frequency.get() / lockin.frequency.set(val)
-ctx.add_parameter("fac", instrument="lockin", attr="frequency", unit="Hz")
-ctx.add_parameter("amplitude", instrument="lockin", attr="amplitude", unit="V")
+bench.add_controller("fac", instrument="lockin", attr="frequency", unit="Hz")
+bench.add_controller("amplitude", instrument="lockin", attr="amplitude", unit="V")
 ```
 
 To find available parameter names, use `instrument.print_readable_snapshot()` or `instrument.parameters.keys()`.
 
-#### Parameters via InstrumentAdapter directly
+#### Controllers via InstrumentAdapter directly
 
-You can create an `InstrumentAdapter` first and pass it to `add_parameter` instead of using a registered name:
+You can create an `InstrumentAdapter` first and pass it to `add_controller` instead of using a registered name:
 
 ```python
 from orchid import InstrumentAdapter
@@ -257,33 +261,33 @@ adapter = InstrumentAdapter.from_qcodes("yoko", yoko)
 # or
 adapter = InstrumentAdapter.from_custom("my_device", my_device)
 
-ctx.add_parameter("Vgt", instrument=adapter, attr="voltage", unit="V")
+bench.add_controller("Vgt", instrument=adapter, attr="voltage", unit="V")
 ```
 
-This is useful when you want to manage adapters outside the context, or use the same adapter for multiple parameters without registering it.
+This is useful when you want to manage adapters outside the context, or use the same adapter for multiple controllers without registering it.
 
-#### Parameters via custom callables
+#### Controllers via custom callables
 
 For full flexibility — or when the get/set logic doesn't map cleanly to a single attribute — pass `get_func` and/or `set_func`:
 
 ```python
 # Custom getter + setter (any arbitrary logic)
-fac = ctx.add_parameter(
+fac = bench.add_controller(
     "fac",
     get_func=lambda: lockin.driver.frequency,
     set_func=lambda v: setattr(lockin.driver, 'frequency', v),
     unit="Hz",
 )
 
-# Read-only parameter (no set_func)
-ctx.add_parameter(
+# Read-only controller (no set_func)
+bench.add_controller(
     "T_mc",
     get_func=lambda: fridge.get_temperature("MC"),
     unit="K",
 )
 
-# Computed parameter (e.g., converting DAC codes to voltage)
-ctx.add_parameter(
+# Computed controller (e.g., converting DAC codes to voltage)
+bench.add_controller(
     "Vgt_actual",
     get_func=lambda: dac.read_channel(3) * 10.0 / 65535,
     set_func=lambda v: dac.write_channel(3, int(v * 65535 / 10.0)),
@@ -301,7 +305,7 @@ ctx.add_parameter(
 | Adapter created externally             | `instrument=adapter_obj, attr="attr_name"`  |
 | Non-standard access pattern            | `get_func=..., set_func=...`                |
 | Read-only value                        | `get_func=...` (no `set_func`)              |
-| Computed / derived quantity             | `get_func=..., set_func=...` with logic     |
+| Computed / derived quantity            | `get_func=..., set_func=...` with logic     |
 
 #### Readouts
 
@@ -309,22 +313,22 @@ Readouts always use a `get_func` callable. The `kind` determines the data shape:
 
 ```python
 # Scalar readout (single number per point)
-ctx.add_readout("lockin_X", kind="scalar",
+bench.add_readout("lockin_X", kind="scalar",
     get_func=lockin_amplifier.read_x, unit="V")
 
 # Trace readout (1D array per point)
-ctx.add_readout("mag", kind="trace", shape=(1601,),
+bench.add_readout("mag", kind="trace", shape=(1601,),
     get_func=vna.get_magnitude, unit="dB",
     contains="transmission magnitude")
 
 # Image readout (2D array per point — e.g. VNA returning freq + mag + phase)
 # Pass contains as a list of column names so live plotters can select columns by name
-ctx.add_readout("S21", kind="image", shape=(3, 1601),
+bench.add_readout("S21", kind="image", shape=(3, 1601),
     get_func=vna.get_trace, unit=["Hz", "dB", "deg"],
     contains=["f", "mag", "phase"])
 
 # Simple 2D image
-ctx.add_readout("camera", kind="image", shape=(480, 640),
+bench.add_readout("camera", kind="image", shape=(480, 640),
     get_func=camera.capture, unit="counts")
 ```
 
@@ -338,12 +342,12 @@ For `IMAGE` readouts, passing `contains` as a `list[str]` (one name per column) 
 
 ---
 
-### Step 3: ExperimentContext
+### Step 3: Bench
 
-The `ExperimentContext` is the central container that holds your entire lab bench configuration: instruments, parameters, readouts, and metadata.
+The `Bench` is the central container that holds your entire lab bench configuration: instruments, parameters, readouts, and metadata.
 
 ```python
-ctx = ExperimentContext(
+bench = Bench(
     data_root="./data",
     metadata={
         "sample": "chip_A1",
@@ -358,11 +362,11 @@ ctx = ExperimentContext(
 
 ```python
 # Set a parameter
-ctx["Vgt"] = 0.4
+bench["Vgt"] = 0.4
 
 # Read a parameter or readout
-voltage = ctx["Vgt"]       # reads from instrument
-signal  = ctx["lockin_X"]  # acquires measurement
+voltage = bench["Vgt"]       # reads from instrument
+signal  = bench["lockin_X"]  # acquires measurement
 ```
 
 #### Snapshot
@@ -370,7 +374,7 @@ signal  = ctx["lockin_X"]  # acquires measurement
 Print a table of current parameter values:
 
 ```python
-ctx.snapshot()
+bench.snapshot()
 ```
 
 Output:
@@ -381,10 +385,10 @@ Vgt       param   0.4      V
 fac       param   2500.0   Hz
 ```
 
-By default `snapshot()` reads only **parameters** (fast: no instrument queries for readouts). Pass `include_readouts=True` to also acquire readout values — useful for a quick sanity check, but slow if readouts involve VNA sweeps or camera captures:
+By default `snapshot()` reads only **controllers** (fast: no instrument queries for readouts). Pass `include_readouts=True` to also acquire readout values — useful for a quick sanity check, but slow if readouts involve VNA sweeps or camera captures:
 
 ```python
-ctx.snapshot(include_readouts=True)
+bench.snapshot(include_readouts=True)
 # Also prints readout rows:
 # lockin_X  scalar  0.0023   V
 # S21       trace   [...]    dB
@@ -393,27 +397,27 @@ ctx.snapshot(include_readouts=True)
 Print only specific parameters or readouts by name:
 
 ```python
-ctx.snapshot(["Vgt", "lockin_X"])
+bench.snapshot(["Vgt", "lockin_X"])
 # explicit list overrides include_readouts; reads exactly what is named
 ```
 
-#### Removing instruments, parameters, and readouts
+#### Removing instruments, controllers, and readouts
 
 ```python
-ctx.remove_parameter("Vgt")
-ctx.remove_readout("S21")
-ctx.remove_instrument("keithley")
-# also removes any parameters that depend on it
+bench.remove_controller("Vgt")
+bench.remove_readout("S21")
+bench.remove_instrument("keithley")
+# also removes any controllers that depend on it
 ```
 
 #### Accessing raw objects
 
-The `Parameter` and `Readout` objects are accessible when you need them (e.g., for `Sweep` setup):
+The `Controller` and `Readout` objects are accessible when you need them (e.g., for `Sweep` setup):
 
 ```python
-ctx.parameters["Vgt"]   # -> Parameter object
-ctx.readouts["S21"]      # -> Readout object
-ctx.instruments["keithley"]  # -> InstrumentAdapter object
+bench.controllers["Vgt"]   # -> Controller object
+bench.readouts["S21"]      # -> Readout object
+bench.instruments["keithley"]  # -> InstrumentAdapter object
 ```
 
 ---
@@ -427,7 +431,7 @@ Procedures define **what** to do. Two types are available:
 ```python
 proc = Procedure(
     name="gate_sweep",
-    context=ctx,
+    bench=bench,
     sweeps=[
         Sweep("Vgt", np.linspace(0, 1, 101)),
     ],
@@ -446,7 +450,7 @@ proc = Procedure(
 | `[Sweep(Vgt, ...), Sweep(fac, ...)]` | 2D |
 | `[Sweep(Vgt, ...), Sweep(fac, ...), Sweep(power, ...)]` | 3D |
 
-You can reference parameters by name (`"Vgt"`) or by the `Parameter` object directly.
+You can reference controllers by name (`"Vgt"`) or by the `Controller` object directly.
 
 #### Write mode
 
@@ -480,7 +484,7 @@ proc = Procedure(..., write_mode=WriteMode.ALL)
 ```python
 proc = Procedure(
     name="gate_freq_map",
-    context=ctx,
+    bench=bench,
     sweeps=[
         Sweep("Vgt", np.linspace(0, 5, 50)),     # outer (slow)
         Sweep("fac", np.linspace(1e3, 1e6, 200)), # inner (fast)
@@ -498,7 +502,7 @@ proc = Procedure(
 ```python
 proc = Procedure(
     name="power_gate_freq_cube",
-    context=ctx,
+    bench=bench,
     sweeps=[
         Sweep("power", np.linspace(-30, 0, 20)),    # outer (slowest)
         Sweep("Vgt", np.linspace(0, 5, 50)),         # middle
@@ -516,7 +520,7 @@ proc = Procedure(
 ```python
 monitor = MonitorProcedure(
     name="temperature_log",
-    context=ctx,
+    bench=bench,
     readouts=["lockin_X", "temperature"],
     interval=0.5,        # read every 0.5 seconds
     duration=60.0,       # run for 60 seconds (None = until stopped)
@@ -544,7 +548,7 @@ data_dir = await runner.arun_monitor(monitor)     # async
 
 # Monitor in background (non-blocking) — change parameters while running
 runner.run_monitor(monitor, background=True)
-ctx["Vgt"] = 0.5   # change parameters from the next cell
+bench["Vgt"] = 0.5   # change parameters from the next cell
 data_dir = runner.stop_monitor()  # stop and get data path
 ```
 
@@ -820,7 +824,7 @@ When `x` is a fixed array (e.g. a frequency list), the plot type auto-detects as
 flist = np.linspace(4e9, 8e9, 1601)
 
 # VNA trace readout (IMAGE, 3 columns: f, mag, phase)
-ctx.add_readout("S21", kind="image", shape=(3, 1601),
+bench.add_readout("S21", kind="image", shape=(3, 1601),
     get_func=vna.get_trace, contains=["f", "mag", "phase"])
 
 # Live line plot: shows current VNA magnitude, refreshing at each power step
@@ -833,7 +837,7 @@ runner.run(proc_power_sweep, plotter=plotter)
 For a plain `TRACE` readout (1D array, no columns), `z_col` is not needed:
 
 ```python
-ctx.add_readout("mag", kind="trace", shape=(1601,), get_func=vna.get_magnitude)
+bench.add_readout("mag", kind="trace", shape=(1601,), get_func=vna.get_magnitude)
 
 plotter = LivePlotter([
     PlotSpec(x=flist, y="mag", update_every="point"),
@@ -847,7 +851,7 @@ When `y` is a fixed array (e.g. frequencies) and `x` is a sweep parameter, the p
 ```python
 flist = np.linspace(4e9, 8e9, 1601)
 
-ctx.add_readout("S21", kind="image", shape=(3, 1601),
+bench.add_readout("S21", kind="image", shape=(3, 1601),
     get_func=vna.get_trace, contains=["f", "mag", "phase"])
 
 # Heatmap: x=power step, y=frequency, color=magnitude
@@ -895,7 +899,7 @@ plotter = LivePlotter([PlotSpec(x="_time", y="lockin_X")])
 runner.run_monitor(monitor, plotter=plotter, background=True)
 
 # In the next cell:
-ctx["Vgt"] = 0.5   # change gate voltage while monitoring
+bench["Vgt"] = 0.5   # change gate voltage while monitoring
 
 # When done:
 data_dir = runner.stop_monitor()
@@ -1036,7 +1040,7 @@ runner.run(proc2, plotter=plotter)  # fresh plot, old server cleaned up
 ```python
 proc = Procedure(
     name="iv_curve",
-    context=ctx,
+    bench=bench,
     sweeps=[Sweep("Vbias", np.linspace(-1, 1, 201))],
     readouts=["current"],
     settle_time=0.01,
@@ -1049,7 +1053,7 @@ data_dir = ExperimentRunner().run(proc)
 ```python
 proc = Procedure(
     name="gate_frequency_map",
-    context=ctx,
+    bench=bench,
     sweeps=[
         Sweep("Vgt", np.linspace(0, 5, 50)),    # outer (slow)
         Sweep("fac", np.linspace(1e3, 1e6, 200)),  # inner (fast)
@@ -1068,7 +1072,7 @@ Snake scan reverses the inner sweep direction on alternating outer iterations, r
 ```python
 proc = Procedure(
     name="gate_map_snake",
-    context=ctx,
+    bench=bench,
     sweeps=[
         Sweep("Vgt", np.linspace(0, 5, 50)),
         Sweep("fac", np.linspace(1e3, 1e6, 200)),
@@ -1092,7 +1096,7 @@ Use `reverse=True` on a `Sweep` to automatically append the reversed values:
 ```python
 proc = Procedure(
     name="hysteresis",
-    context=ctx,
+    bench=bench,
     sweeps=[
         Sweep("Vgt", np.linspace(0, 1, 100), reverse=True),
         # values become: [0, 0.01, ..., 1.0, 1.0, 0.99, ..., 0]
@@ -1109,7 +1113,7 @@ Monitor instruments in real time without sweeping:
 ```python
 monitor = MonitorProcedure(
     name="stability_check",
-    context=ctx,
+    bench=bench,
     readouts=["lockin_X", "temperature"],
     interval=1.0,       # 1 second between reads
     duration=3600.0,    # 1 hour
@@ -1123,7 +1127,7 @@ With a stop condition:
 ```python
 monitor = MonitorProcedure(
     name="cooldown_watch",
-    context=ctx,
+    bench=bench,
     readouts=["temperature"],
     interval=5.0,
     duration=None,  # run indefinitely
@@ -1157,17 +1161,66 @@ the remaining buffer is always flushed before the file is closed, so no data is 
 normal conditions. Only an abrupt process kill (power loss, `SIGKILL`) could lose buffered
 samples.
 
-### Parameter Event Logging
+### Controller Limits
 
-While a background monitor is running, every `ctx["param"] = value` call is automatically recorded as a timestamped event. Events are saved to `events.yaml` alongside the data when the monitor finishes.
+Attach soft or hard bounds to any controller. When `set()` or `aset()` is called with a value outside the range, the value is clamped and the violation is handled according to the `limit_policy`.
+
+```python
+from orchid import LimitPolicy
+
+# Soft limit — warn once, then log silently (default)
+bench.add_controller("Vgt", instrument="yoko", attr="voltage", unit="V",
+                     limits=(-3.0, 3.0))
+
+# Hard safety limit — stop the experiment immediately
+bench.add_controller("heater", instrument="tc", attr="power", unit="W",
+                     limits=(0.0, 0.1), limit_policy=LimitPolicy.RAISE)
+
+# Silent log — inspect after the run
+bench.add_controller("Vbg", instrument="yoko", attr="voltage", unit="V",
+                     limits=(-5.0, 5.0), limit_policy=LimitPolicy.LOG)
+```
+
+The runner resets all limit logs at the start of each run and saves `limit_log.yaml` when violations occurred:
+
+```python
+runner.run(proc)
+
+# Read violations after the run:
+from orchid import read_limit_log
+
+entries = read_limit_log(data_dir)
+for e in entries:
+    print(f"{e['controller']}[{e['index']}]: {e['requested']} → {e['clamped']}")
+# Vgt[(42,)]: 3.2 → 3.0
+# Vgt[(43,)]: 3.5 → 3.0
+```
+
+Inspect live (without a file):
+
+```python
+bench.controllers["Vgt"].limit_log
+# [LimitEntry(index=(42,), requested=3.2, clamped=3.0),
+#  LimitEntry(index=(43,), requested=3.5, clamped=3.0)]
+
+len(bench.controllers["Vgt"].limit_log)  # how many points were clamped
+```
+
+`limit_log.yaml` is only written when at least one violation occurred. Returns `[]` if the file does not exist.
+
+---
+
+### Controller Event Logging
+
+While a background monitor is running, every `bench["param"] = value` call is automatically recorded as a timestamped event. Events are saved to `events.yaml` alongside the data when the monitor finishes.
 
 ```python
 runner.run_monitor(monitor, plotter=plotter, background=True)
 
 # These are recorded automatically:
-ctx["Vgt"] = 0.5    # t=12.3s
-ctx["Vgt"] = 1.0    # t=45.7s
-ctx["fac"] = 3000   # t=60.1s
+bench["Vgt"] = 0.5    # t=12.3s
+bench["Vgt"] = 1.0    # t=45.7s
+bench["fac"] = 3000   # t=60.1s
 
 data_dir = runner.stop_monitor()
 ```
@@ -1202,7 +1255,7 @@ If a `LivePlotter` is passed with a `PlotSpec(x="_time", ...)`, each parameter c
 plotter = LivePlotter([PlotSpec(x="_time", y="lockin_X")])
 runner.run_monitor(monitor, plotter=plotter, background=True)
 
-ctx["Vgt"] = 0.5   # dashed marker line appears on the plot immediately
+bench["Vgt"] = 0.5   # dashed marker line appears on the plot immediately
 ```
 
 If no events occurred during the run, no `events.yaml` is written.
@@ -1223,12 +1276,12 @@ runner.run_monitor(monitor, plotter=plotter, background=True)
 
 ```python
 # Cell 2: change parameters while monitoring
-ctx["Vgt"] = 0.5
+bench["Vgt"] = 0.5
 ```
 
 ```python
 # Cell 3: change again
-ctx["Vgt"] = 1.0
+bench["Vgt"] = 1.0
 ```
 
 ```python
@@ -1249,11 +1302,11 @@ def ramp_field():
 def log_point(index):
     """Print every 100th point."""
     if sum(index) % 100 == 0:
-        print(f"Point {index}: Vgt={ctx['Vgt']:.3f}")
+        print(f"Point {index}: Vgt={bench['Vgt']:.3f}")
 
 proc = Procedure(
     name="with_hooks",
-    context=ctx,
+    bench=bench,
     sweeps=[Sweep("Vgt", np.linspace(0, 1, 500))],
     readouts=["lockin_X"],
     before_experiment=ramp_field,
@@ -1279,13 +1332,13 @@ All hooks support both sync and async callables.
 Record different data types in a single experiment:
 
 ```python
-ctx.add_readout("lockin_X", kind="scalar", get_func=lockin.read_x, unit="V")
-ctx.add_readout("S21", kind="trace", shape=(1601,), get_func=vna.get_trace, unit="dB")
-ctx.add_readout("frame", kind="image", shape=(480, 640), get_func=camera.snap, unit="counts")
+bench.add_readout("lockin_X", kind="scalar", get_func=lockin.read_x, unit="V")
+bench.add_readout("S21", kind="trace", shape=(1601,), get_func=vna.get_trace, unit="dB")
+bench.add_readout("frame", kind="image", shape=(480, 640), get_func=camera.snap, unit="counts")
 
 proc = Procedure(
     name="mixed",
-    context=ctx,
+    bench=bench,
     sweeps=[Sweep("Vgt", np.linspace(0, 1, 50))],
     readouts=["lockin_X", "S21", "frame"],
 )
@@ -1431,31 +1484,54 @@ Thin wrapper normalizing pymeasure/qcodes/custom instruments into a uniform inte
 
 ---
 
-### Parameter
+### Controller
 
 ```python
-from orchid import Parameter
+from orchid import Controller
 ```
 
 A named control parameter mapped to an instrument channel.
 
-| Argument     | Type                          | Default | Description                     |
-|--------------|-------------------------------|---------|---------------------------------|
-| `name`       | `str`                         | required| Short label (e.g. `"Vgt"`)     |
-| `instrument` | `InstrumentAdapter` or `None` | `None`  | Instrument this parameter uses  |
-| `attr`       | `str` or `None`               | `None`  | Attribute name on instrument    |
-| `get_func`   | `callable` or `None`          | `None`  | Custom getter (overrides adapter)|
-| `set_func`   | `callable` or `None`          | `None`  | Custom setter (overrides adapter)|
-| `unit`       | `str` or `None`               | `None`  | Physical unit                   |
+| Argument       | Type                            | Default             | Description                                      |
+|----------------|---------------------------------|---------------------|--------------------------------------------------|
+| `name`         | `str`                           | required            | Short label (e.g. `"Vgt"`)                       |
+| `instrument`   | `InstrumentAdapter` or `None`   | `None`              | Instrument this controller uses                  |
+| `attr`         | `str` or `None`                 | `None`              | Attribute name on instrument                     |
+| `get_func`     | `callable` or `None`            | `None`              | Custom getter (overrides adapter)                |
+| `set_func`     | `callable` or `None`            | `None`              | Custom setter (overrides adapter)                |
+| `unit`         | `str` or `None`                 | `None`              | Physical unit                                    |
+| `limits`       | `tuple[float, float]` or `None` | `None`              | `(lo, hi)` inclusive bounds. `None` = unconstrained. |
+| `limit_policy` | `LimitPolicy`                   | `LimitPolicy.WARN`  | Response to limit violations — see `LimitPolicy`. |
 
-| Method                        | Description             |
-|-------------------------------|-------------------------|
-| `get() -> Any`                | Read current value      |
-| `set(value) -> None`          | Write value             |
-| `await aget() -> Any`         | Async read              |
-| `await aset(value) -> None`   | Async write             |
+| Method                        | Description                                              |
+|-------------------------------|----------------------------------------------------------|
+| `get() -> Any`                | Read current value (no clamping)                         |
+| `set(value) -> None`          | Clamp to limits (if set) then apply                      |
+| `await aget() -> Any`         | Async read                                               |
+| `await aset(value) -> None`   | Async clamp + apply                                      |
+| `clear_limit_log() -> None`   | Reset violation log and warn-once flag. Called automatically by the runner at the start of each run. |
+
+| Property      | Type               | Description                              |
+|---------------|--------------------|------------------------------------------|
+| `limit_log`   | `list[LimitEntry]` | All violations recorded since last reset |
 
 **Precedence:** `get_func`/`set_func` override `instrument.get(attr)`/`instrument.set(attr)`.
+
+---
+
+### LimitPolicy
+
+```python
+from orchid import LimitPolicy
+```
+
+| Value               | Behaviour                                                                   |
+|---------------------|-----------------------------------------------------------------------------|
+| `LimitPolicy.WARN`  | Clamp the value; emit a `warnings.warn` on the **first** violation per run, then log silently. Default. |
+| `LimitPolicy.RAISE` | Raise `ValueError` immediately — use for hard safety limits.                |
+| `LimitPolicy.LOG`   | Clamp silently and record every violation; inspect via `controller.limit_log`. |
+
+Each violation is stored as a `LimitEntry(index, requested, clamped)` named tuple where `index` is the sweep position (e.g. `(42,)` for 1D, `(3, 17)` for 2D, `()` for manual calls).
 
 ---
 
@@ -1497,10 +1573,10 @@ from orchid import DataKind
 
 ---
 
-### ExperimentContext
+### Bench
 
 ```python
-from orchid import ExperimentContext
+from orchid import Bench
 ```
 
 Central container for the entire lab bench configuration.
@@ -1510,13 +1586,13 @@ Central container for the entire lab bench configuration.
 | `data_root` | `str` or `Path`   | `"./data"`| Root directory for saved data      |
 | `metadata`  | `dict`            | `{}`      | User metadata (sample, operator, etc.) |
 
-| Attribute      | Type                             | Description           |
-|----------------|----------------------------------|-----------------------|
-| `instruments`  | `dict[str, InstrumentAdapter]`   | Registered instruments|
-| `parameters`   | `dict[str, Parameter]`           | Registered parameters |
-| `readouts`     | `dict[str, Readout]`             | Registered readouts   |
-| `data_root`    | `Path`                           | Data output root      |
-| `metadata`     | `dict`                           | User metadata         |
+| Attribute      | Type                             | Description            |
+|----------------|----------------------------------|------------------------|
+| `instruments`  | `dict[str, InstrumentAdapter]`   | Registered instruments |
+| `controllers`  | `dict[str, Controller]`          | Registered controllers |
+| `readouts`     | `dict[str, Readout]`             | Registered readouts    |
+| `data_root`    | `Path`                           | Data output root       |
+| `metadata`     | `dict`                           | User metadata          |
 
 #### Methods
 
@@ -1524,7 +1600,7 @@ Central container for the entire lab bench configuration.
 
 Register an instrument. `backend` can be `"auto"`, `"pymeasure"`, `"qcodes"`, or `"custom"`.
 
-**`add_parameter(name, instrument=None, attr=None, get_func=None, set_func=None, unit=None) -> Parameter`**
+**`add_controller(name, instrument=None, attr=None, get_func=None, set_func=None, unit=None) -> Controller`**
 
 Register a control parameter. `instrument` can be an `InstrumentAdapter` object or the string name of a registered instrument.
 
@@ -1534,27 +1610,27 @@ Register a measurement readout. `kind` can be a `DataKind` enum or string (`"sca
 
 **`remove_instrument(name) -> None`**
 
-Remove an instrument and **all parameters that depend on it**. Raises `KeyError` if not found.
+Remove an instrument and **all controllers that depend on it**. Raises `KeyError` if not found.
 
-**`remove_parameter(name) -> None`**
+**`remove_controller(name) -> None`**
 
-Remove a parameter. Raises `KeyError` if not found.
+Remove a controller. Raises `KeyError` if not found.
 
 **`remove_readout(name) -> None`**
 
 Remove a readout. Raises `KeyError` if not found.
 
-**`ctx[name]`** — Get current value (calls `parameter.get()` or `readout.read()`).
+**`bench[name]`** — Get current value (calls `parameter.get()` or `readout.read()`).
 
-**`ctx[name] = value`** — Set parameter value (calls `parameter.set(value)`).
+**`bench[name] = value`** — Set parameter value (calls `parameter.set(value)`).
 
 **`snapshot(names=None, *, include_readouts=False) -> None`**
 
-Print a formatted table of current values using `tabulate`. By default reads only parameters (fast). Pass `include_readouts=True` to also acquire readout values.
+Print a formatted table of current values using `tabulate`. By default reads only controllers (fast). Pass `include_readouts=True` to also acquire readout values.
 
-| Argument           | Type                  | Default | Description                                                    |
-|--------------------|-----------------------|---------|----------------------------------------------------------------|
-| `names`            | `list[str]` or `None` | `None`  | Explicit name list; `None` = all (uses `include_readouts` flag) |
+| Argument           | Type                  | Default | Description                                                      |
+|--------------------|-----------------------|---------|------------------------------------------------------------------|
+| `names`            | `list[str]` or `None` | `None`  | Explicit name list; `None` = all (uses `include_readouts` flag)  |
 | `include_readouts` | `bool`                | `False` | When `names=None`, also read registered readouts. Ignored when `names` is given. |
 
 ---
@@ -1565,13 +1641,13 @@ Print a formatted table of current values using `tabulate`. By default reads onl
 from orchid import Sweep
 ```
 
-Defines a sweep over one parameter.
+Defines a sweep over one controller.
 
-| Argument    | Type                  | Default | Description                          |
-|-------------|-----------------------|---------|--------------------------------------|
-| `parameter` | `Parameter` or `str`  | required| Parameter to sweep (or its name)     |
-| `values`    | `array-like`          | required| Sweep values                         |
-| `reverse`   | `bool`                | `False` | Append reversed values (hysteresis)  |
+| Argument     | Type                   | Default  | Description                           |
+|--------------|------------------------|----------|---------------------------------------|
+| `controller` | `Controller` or `str`  | required | Controller to sweep (or its name)     |
+| `values`     | `array-like`           | required | Sweep values                          |
+| `reverse`    | `bool`                 | `False`  | Append reversed values (hysteresis)   |
 
 | Property  | Type  | Description                         |
 |-----------|-------|-------------------------------------|
@@ -1587,21 +1663,21 @@ When `reverse=True`, the values array is doubled: `[forward, reversed]`.
 from orchid import MultiSweep
 ```
 
-Sweep multiple parameters simultaneously along a shared axis. All parameters step together at each point.
+Sweep multiple controllers simultaneously along a shared axis. All controllers step together at each point.
 
-| Argument     | Type                     | Default  | Description                                         |
-|--------------|--------------------------|----------|-----------------------------------------------------|
-| `parameters` | `list[Parameter or str]` | required | Parameters to sweep simultaneously                  |
-| `values`     | `list[array-like]`       | required | One values array per parameter, all the same length |
-| `reverse`    | `bool`                   | `False`  | Append reversed values (hysteresis) on all arrays   |
+| Argument      | Type                      | Default  | Description                                          |
+|---------------|---------------------------|----------|------------------------------------------------------|
+| `controllers` | `list[Controller or str]` | required | Controllers to sweep simultaneously                  |
+| `values`      | `list[array-like]`        | required | One values array per controller, all the same length |
+| `reverse`     | `bool`                    | `False`  | Append reversed values (hysteresis) on all arrays    |
 
 ```python
 proc = Procedure(
     name="gate_pair_sweep",
-    context=ctx,
+    bench=bench,
     sweeps=[
         MultiSweep(
-            parameters=["Vgt", "Vbg"],
+            controllers=["Vgt", "Vbg"],
             values=[np.linspace(0, 1, 100), np.linspace(0, 5, 100)],
         )
     ],
@@ -1616,21 +1692,21 @@ Can be freely mixed with regular `Sweep` in the same procedure:
 ```python
 proc = Procedure(
     sweeps=[
-        Sweep("power", np.linspace(-30, 0, 20)),           # outer: slow axis
-        MultiSweep(["Vgt", "Vbg"], [vgt_vals, vbg_vals]),  # inner: fast axis
+        Sweep("power", np.linspace(-30, 0, 20)),            # outer: slow axis
+        MultiSweep(["Vgt", "Vbg"], [vgt_vals, vbg_vals]),   # inner: fast axis
     ],
     ...
 )
 # Result shape: lockin_X -> (20, 100)
 ```
 
-| Property    | Description                                    |
-|-------------|------------------------------------------------|
-| `values`    | First parameter's values array (for iteration) |
-| `all_values`| List of all parameters' value arrays           |
-| `length`    | Number of points                               |
-| `name`      | Combined name, e.g. `"Vgt+Vbg"`               |
-| `parameter` | First parameter (for axis labelling)           |
+| Property     | Description                                      |
+|--------------|--------------------------------------------------|
+| `values`     | First controller's values array (for iteration)  |
+| `all_values` | List of all controllers' value arrays            |
+| `length`     | Number of points                                 |
+| `name`       | Combined name, e.g. `"Vgt+Vbg"`                 |
+| `controller` | First controller (for axis labelling)            |
 
 ---
 
@@ -1645,7 +1721,7 @@ Experiment procedure for sweep-based measurements.
 | Argument           | Type                        | Default              | Description                                 |
 |--------------------|-----------------------------|----------------------|---------------------------------------------|
 | `name`             | `str`                       | required             | Experiment name                             |
-| `context`          | `ExperimentContext`          | required             | Lab bench configuration                     |
+| `bench`            | `Bench`                      | required             | Lab bench configuration                     |
 | `sweeps`           | `list[Sweep or MultiSweep]` | `[]`                 | Sweep axes (outer-first ordering)           |
 | `readouts`         | `list[str]`                 | `[]`                 | Readout names to record                     |
 | `settle_time`      | `float`                     | `0.0`                | Seconds to wait after set, before read      |
@@ -1685,7 +1761,7 @@ Time-series monitoring procedure (no sweeps).
 | Argument           | Type                | Default              | Description                                 |
 |--------------------|---------------------|----------------------|---------------------------------------------|
 | `name`             | `str`               | required             | Session name                                |
-| `context`          | `ExperimentContext`  | required             | Lab bench configuration                     |
+| `bench`            | `Bench`              | required             | Lab bench configuration                     |
 | `readouts`         | `list[str]`         | `[]`                 | Readout names to record                     |
 | `interval`         | `float`             | `1.0`                | Seconds between reads                       |
 | `duration`         | `float` or `None`   | `None`               | Total duration; `None` = run until stopped  |
@@ -1905,7 +1981,7 @@ All methods return the `Path` to the output data directory.
 |-----------------|-------------------------|---------|------------------------------------------------|
 | `procedure`     | `MonitorProcedure`      | required| The monitoring procedure                       |
 | `plotter`       | `LivePlotter` or `None` | `None`  | Live plotter                                   |
-| `background`    | `bool`                  | `False` | If `True`, run in background thread and return immediately. Use `ctx["Vgt"] = 0.5` to change parameters, `runner.stop_monitor()` to stop. |
+| `background`    | `bool`                  | `False` | If `True`, run in background thread and return immediately. Use `bench["Vgt"] = 0.5` to change parameters, `runner.stop_monitor()` to stop. |
 | `print_summary` | `bool`                  | `False` | If `True`, print the procedure summary table before running. |
 | `return_path`   | `bool`                  | `False` | If `True`, return the `Path` to the saved data directory. In background mode, always returns `None`; use `stop_monitor()` to get the path. |
 
@@ -1952,7 +2028,7 @@ loop:
 ### Utility Functions
 
 ```python
-from orchid import apply_theme, PALETTE, read_events, read_metadata, read_procedure, update_metadata
+from orchid import apply_theme, PALETTE, read_events, read_limit_log, read_metadata, read_procedure, update_metadata
 ```
 
 **`apply_theme(palette="vivid", colorscale="Inferno", name="sw_clean", base="simple_white") -> str`**
@@ -2016,13 +2092,25 @@ d["shape"]                       # e.g. [100, 50]
 d["settings"]["write_mode"]      # e.g. "sweepwise"
 d["settings"]["settle_time"]     # in seconds
 d["estimated_duration_s"]        # lower-bound estimate
-d["sweeps"][0]["parameter"]      # first sweep's parameter name
+d["sweeps"][0]["controller"]      # first sweep's controller name
 d["sweeps"][0]["min"]            # sweep start value
 d["sweeps"][0]["max"]            # sweep end value
 d["hooks"]["after_point"]        # None, or dict with "name", "doc", "source"
 ```
 
 For a `MonitorProcedure` the dict contains `kind="monitor"`, `settings["interval"]`, `settings["duration"]`, `settings["chunk_size"]`, and no `sweeps` key.
+
+**`read_limit_log(data_dir) -> list[dict]`**
+
+Read controller limit violations recorded during an experiment. Returns a list of dicts with keys `controller`, `index`, `requested`, `clamped`. Returns `[]` if no violations occurred or `limit_log.yaml` does not exist.
+
+```python
+entries = read_limit_log("./data/0005")
+for e in entries:
+    print(f"{e['controller']}[{e['index']}]: {e['requested']} → {e['clamped']}")
+```
+
+---
 
 **`read_events(data_dir) -> list[dict]`**
 
@@ -2076,6 +2164,7 @@ data/0001/
   metadata.yaml       # status, date, schema, tags, user metadata
   procedure.yaml      # full procedure spec: sweeps, readouts, settings, hook source
   events.yaml         # parameter changes during monitor runs (only if any occurred)
+  limit_log.yaml      # controller limit violations (only if any occurred)
 ```
 
 **Metadata includes:** date (ISO 8601), schema, tags, and all user metadata from both the context and the procedure.
@@ -2094,17 +2183,17 @@ data/0001/
                     +------------+------------+
                     |                         |
               +-----+------+          +------+-----+
-              |  Parameter |          |   Readout  |
+              | Controller |          |   Readout  |
               |  (get/set) |          | (read-only)|
               +-----+------+          +------+-----+
                     |                         |
                     +------------+------------+
                                  |
                      +-----------+-----------+
-                     |  ExperimentContext    |
-                     |  ctx["Vgt"] = 0.4    |
-                     |  ctx["S21"]          |
-                     |  ctx.snapshot()      |
+                     |         Bench        |
+                     |  bench["Vgt"] = 0.4  |
+                     |  bench["S21"]        |
+                     |  bench.snapshot()    |
                      +-----------+-----------+
                                  |
                     +------------+------------+

@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .parameter import DataKind
+from .controller import DataKind
 
 
 @dataclass
@@ -270,8 +270,8 @@ class LivePlotter:
                 self._resolved_types.append(spec.plot_type)
 
         # Validate readout names.
-        if hasattr(proc, "context"):
-            registered = set(proc.context.readouts.keys())
+        if hasattr(proc, "bench"):
+            registered = set(proc.bench.readouts.keys())
             for spec, ptype in zip(self.specs, self._resolved_types):
                 if ptype == "heatmap":
                     readout_names = [spec.z] if spec.z else []
@@ -487,7 +487,7 @@ class LivePlotter:
     def notify_event(self, timestamp: float, param: str, value) -> None:
         """Mark a parameter change on all time-series subplots.
 
-        Called automatically by the runner when ``ctx["param"] = value``
+        Called automatically by the runner when ``bench["param"] = value``
         is executed during a monitor run. Draws a vertical dashed line
         and a label on every subplot whose x-axis is ``"_time"``.
         """
@@ -642,11 +642,11 @@ class LivePlotter:
                 # Find sweep objects matching spec.x (heatmap x-axis)
                 # and spec.y (heatmap y-axis)
                 x_sweep = next(
-                    (s for s in proc.sweeps if s.parameter.name == spec.x),
+                    (s for s in proc.sweeps if s.controller.name == spec.x),
                     proc.sweeps[-1],
                 )
                 y_sweep = next(
-                    (s for s in proc.sweeps if s.parameter.name == spec.y),
+                    (s for s in proc.sweeps if s.controller.name == spec.y),
                     proc.sweeps[0] if len(proc.sweeps) >= 2 else None,
                 )
 
@@ -694,7 +694,7 @@ class LivePlotter:
                 y_arr = np.asarray(spec.y, dtype=np.float64)
                 n_freq = len(y_arr)
                 x_sweep = next(
-                    (s for s in proc.sweeps if s.parameter.name == spec.x),
+                    (s for s in proc.sweeps if s.controller.name == spec.x),
                     proc.sweeps[0],
                 )
                 x_vals = x_sweep.values
@@ -939,8 +939,8 @@ class LivePlotter:
         if not isinstance(readout_name, str) or readout_name not in data:
             return
         raw = np.asarray(data[readout_name])
-        if hasattr(self._proc, "context"):
-            readout = self._proc.context.readouts[readout_name]
+        if hasattr(self._proc, "bench"):
+            readout = self._proc.bench.readouts[readout_name]
             y_vals = self._extract_col(raw, spec.z_col, readout)
         else:
             y_vals = (raw[:, spec.z_col] if isinstance(spec.z_col, int) else raw).astype(np.float64)
@@ -954,8 +954,8 @@ class LivePlotter:
         if not spec.z or spec.z not in data or len(index) == 0:
             return
         raw = np.asarray(data[spec.z])
-        if hasattr(self._proc, "context"):
-            readout = self._proc.context.readouts[spec.z]
+        if hasattr(self._proc, "bench"):
+            readout = self._proc.bench.readouts[spec.z]
             col_data = self._extract_col(raw, spec.z_col, readout)
         else:
             col_data = (raw[:, spec.z_col] if isinstance(spec.z_col, int) else raw).astype(np.float64)

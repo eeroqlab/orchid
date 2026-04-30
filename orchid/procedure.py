@@ -10,8 +10,8 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .context import ExperimentContext
-from .parameter import Parameter
+from .bench import Bench
+from .controller import Controller
 
 
 def _describe_hook(fn) -> dict | None:
@@ -89,19 +89,19 @@ class WriteMode(StrEnum):
 
 @dataclass
 class Sweep:
-    """Defines a sweep over one parameter.
+    """Defines a sweep over one controller.
 
     Parameters
     ----------
-    parameter : Parameter or str
-        The parameter to sweep (or its name in the context).
+    controller : Controller or str
+        The controller to sweep (or its name in the context).
     values : array-like
         Sweep values.
     reverse : bool
         If True, append reversed values for hysteresis sweep.
     """
 
-    parameter: Parameter | str
+    controller: Controller | str
     values: np.ndarray
     reverse: bool = False
 
@@ -116,19 +116,19 @@ class Sweep:
 
 
 class MultiSweep:
-    """Sweep multiple parameters simultaneously along a shared axis.
+    """Sweep multiple controllers simultaneously along a shared axis.
 
-    All parameters step together: at point i,
-    ``parameters[0]`` is set to ``values[0][i]``,
-    ``parameters[1]`` is set to ``values[1][i]``, and so on.
+    All controllers step together: at point i,
+    ``controllers[0]`` is set to ``values[0][i]``,
+    ``controllers[1]`` is set to ``values[1][i]``, and so on.
 
     Parameters
     ----------
-    parameters : list of Parameter or str
-        Parameters to sweep simultaneously. String names are resolved
+    controllers : list of Controller or str
+        Controllers to sweep simultaneously. String names are resolved
         against the context in ``Procedure.__post_init__``.
     values : list of array-like
-        One values array per parameter. All arrays must have the same length.
+        One values array per controller. All arrays must have the same length.
     reverse : bool
         If True, append reversed values for hysteresis on all arrays.
 
@@ -137,18 +137,18 @@ class MultiSweep:
     Gate and back-gate swept together::
 
         MultiSweep(
-            parameters=["Vgt", "Vbg"],
+            controllers=["Vgt", "Vbg"],
             values=[np.linspace(0, 1, 100), np.linspace(0, 5, 100)],
         )
     """
 
-    def __init__(self, parameters: list, values: list, reverse: bool = False):
+    def __init__(self, controllers: list, values: list, reverse: bool = False):
         self.all_values = [np.asarray(v) for v in values]
         self.reverse = reverse
 
-        if len(parameters) != len(self.all_values):
+        if len(controllers) != len(self.all_values):
             raise ValueError(
-                f"MultiSweep: number of parameters ({len(parameters)}) "
+                f"MultiSweep: number of controllers ({len(controllers)}) "
                 f"must match number of value arrays ({len(self.all_values)})"
             )
         lengths = [len(v) for v in self.all_values]
@@ -159,8 +159,8 @@ class MultiSweep:
         if reverse:
             self.all_values = [np.concatenate([v, v[::-1]]) for v in self.all_values]
 
-        # Keep parameters as-is — strings are resolved later by Procedure.__post_init__
-        self.parameters = list(parameters)
+        # Keep controllers as-is — strings are resolved later by Procedure.__post_init__
+        self.controllers = list(controllers)
 
     # ── Sweep-compatible interface ────────────────────────────────────
 
@@ -175,19 +175,19 @@ class MultiSweep:
         return len(self.all_values[0])
 
     @property
-    def parameter(self):
-        """First parameter — used for naming and plotter axis labels."""
-        return self.parameters[0]
+    def controller(self):
+        """First controller — used for naming and plotter axis labels."""
+        return self.controllers[0]
 
     @property
     def name(self) -> str:
         """Combined name, e.g. ``'Vgt+Vbg'``."""
         return "+".join(
-            p.name if hasattr(p, "name") else str(p) for p in self.parameters
+            p.name if hasattr(p, "name") else str(p) for p in self.controllers
         )
 
     def __repr__(self) -> str:
-        names = [p.name if hasattr(p, "name") else str(p) for p in self.parameters]
+        names = [p.name if hasattr(p, "name") else str(p) for p in self.controllers]
         return f"MultiSweep({names}, length={self.length})"
 
 
@@ -199,7 +199,7 @@ class Procedure:
     ----------
     name : str
         Name for this experiment run.
-    context : ExperimentContext
+    bench : Bench
         The lab bench configuration.
     sweeps : list of Sweep or MultiSweep
         Sweep axes. Length determines dimensionality: 1=1D, 2=2D, 3=3D.
@@ -254,7 +254,7 @@ class Procedure:
     """
 
     name: str
-    context: ExperimentContext
+    bench: Bench
     sweeps: list[Sweep] = field(default_factory=list)
     readouts: list[str] = field(default_factory=list)
     settle_time: float = 0.0
@@ -273,19 +273,19 @@ class Procedure:
     after_sweep: Callable | None = None
 
     def __post_init__(self):
-        # Resolve string references to Parameter objects
+        # Resolve string references to Controller objects
         for sweep in self.sweeps:
             if isinstance(sweep, MultiSweep):
-                sweep.parameters = [
-                    self.context.parameters[p] if isinstance(p, str) else p
-                    for p in sweep.parameters
+                sweep.controllers = [
+                    self.bench.controllers[p] if isinstance(p, str) else p
+                    for p in sweep.controllers
                 ]
-            elif isinstance(sweep.parameter, str):
-                sweep.parameter = self.context.parameters[sweep.parameter]
+            elif isinstance(sweep.controller, str):
+                sweep.controller = self.bench.controllers[sweep.controller]
         # Validate readout names
         for rname in self.readouts:
-            if rname not in self.context.readouts:
-                raise KeyError(f"Readout {rname!r} not found in context")
+            if rname not in self.bench.readouts:
+                raise KeyError(f"Readout {rname!r} not found in bench")
 
     @property
     def ndim(self) -> int:
@@ -309,34 +309,34 @@ class Procedure:
                         "max": float(np.max(vals)),
                         "unit": p.unit,
                     }
-                    for p, vals in zip(s.parameters, s.all_values)
+                    for p, vals in zip(s.controllers, s.all_values)
                 ]
                 sweeps_list.append({
                     "axis": i,
                     "type": "multi",
                     "n": s.length,
                     "reverse": s.reverse,
-                    "parameters": params_info,
+                    "controllers": params_info,
                 })
             else:
                 sweeps_list.append({
                     "axis": i,
                     "type": "single",
-                    "parameter": s.parameter.name,
+                    "controller": s.controller.name,
                     "min": float(np.min(s.values)),
                     "max": float(np.max(s.values)),
                     "n": s.length,
-                    "unit": s.parameter.unit,
+                    "unit": s.controller.unit,
                     "reverse": s.reverse,
                 })
 
         readouts_list = [
             {
-                "name": self.context.readouts[rname].name,
-                "kind": self.context.readouts[rname].kind.value,
-                "unit": self.context.readouts[rname].unit,
-                "shape": list(self.context.readouts[rname].shape)
-                         if self.context.readouts[rname].shape else None,
+                "name": self.bench.readouts[rname].name,
+                "kind": self.bench.readouts[rname].kind.value,
+                "unit": self.bench.readouts[rname].unit,
+                "shape": list(self.bench.readouts[rname].shape)
+                         if self.bench.readouts[rname].shape else None,
             }
             for rname in self.readouts
         ]
@@ -386,7 +386,7 @@ class MonitorProcedure:
     ----------
     name : str
         Name for this monitoring session.
-    context : ExperimentContext
+    bench : Bench
         The lab bench configuration.
     readouts : list of str
         Names of readouts to record.
@@ -422,7 +422,7 @@ class MonitorProcedure:
     """
 
     name: str
-    context: ExperimentContext
+    bench: Bench
     readouts: list[str] = field(default_factory=list)
     interval: float = 1.0
     duration: float | None = None
@@ -437,18 +437,18 @@ class MonitorProcedure:
 
     def __post_init__(self):
         for rname in self.readouts:
-            if rname not in self.context.readouts:
-                raise KeyError(f"Readout {rname!r} not found in context")
+            if rname not in self.bench.readouts:
+                raise KeyError(f"Readout {rname!r} not found in bench")
 
     def to_dict(self) -> dict:
         """Serialize monitor procedure to a plain dict for YAML / summary display."""
         readouts_list = [
             {
-                "name": self.context.readouts[rname].name,
-                "kind": self.context.readouts[rname].kind.value,
-                "unit": self.context.readouts[rname].unit,
-                "shape": list(self.context.readouts[rname].shape)
-                         if self.context.readouts[rname].shape else None,
+                "name": self.bench.readouts[rname].name,
+                "kind": self.bench.readouts[rname].kind.value,
+                "unit": self.bench.readouts[rname].unit,
+                "shape": list(self.bench.readouts[rname].shape)
+                         if self.bench.readouts[rname].shape else None,
             }
             for rname in self.readouts
         ]
@@ -471,13 +471,7 @@ class MonitorProcedure:
             "hooks": hooks,
         }
 
-    def summary(self) -> dict:
-        """Print a formatted summary table of this monitor procedure.
-
-        Returns the serialized dict so callers can reuse it without a
-        second ``to_dict()`` call (e.g. to write ``procedure.yaml``).
-        """
+    def summary(self) -> None:
+        """Print a formatted summary table of this monitor procedure."""
         from .utils import _format_procedure_summary
-        d = self.to_dict()
-        print(_format_procedure_summary(d))
-        return d
+        print(_format_procedure_summary(self.to_dict()))
