@@ -110,8 +110,8 @@ class Bench:
         kind: DataKind | str,
         get_func,
         shape: tuple[int, ...] | None = None,
-        unit: str | None = None,
-        contains: str | None = None,
+        unit: str | list[str] | None = None,
+        contains: str | list[str] | None = None,
     ) -> Readout:
         """Register a measurement readout.
 

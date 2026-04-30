@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "Orchestrating Instruments & Data — a lab experiment control system"
 requires-python = ">=3.12"
 license = {text = "MIT"}
+authors = [
+    {name="Niyaz Beysengulov", email="nbeysengulov@eeroq.com"},
+]
 dependencies = [
     "numpy",
     "tqdm",
@@ -21,7 +24,7 @@ qcodes = ["qcodes"]
 pymeasure = ["pymeasure"]
 
 [tool.setuptools.packages.find]
-include = ["orchid*"]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

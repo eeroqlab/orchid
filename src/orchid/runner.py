@@ -31,28 +31,31 @@ from zarro.core2 import StreamingWriter
 def _run_coro(coro):
     """Run a coroutine, handling both script and Jupyter (running loop) contexts.
 
-    On KeyboardInterrupt, explicitly cancels the underlying task so the
-    experiment stops immediately instead of continuing in the background.
+    In script mode (no running event loop) uses ``asyncio.run()`` directly.
+    In Jupyter / IPython mode the coroutine is executed in a dedicated
+    background thread with its own event loop.  This avoids the
+    ``RuntimeError: cannot enter context: already entered`` crash that
+    ``nest_asyncio`` triggers on Python 3.12+ when an instrument driver
+    has its own async callbacks running on the same loop.
     """
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
-        # No event loop running — normal script context
+        # No event loop running — normal script context.
         return asyncio.run(coro)
-    else:
-        # Event loop already running (Jupyter, IPython, etc.)
-        import nest_asyncio
-        nest_asyncio.apply(loop)
-        task = loop.create_task(coro)
+
+    # Event loop already running (Jupyter, IPython, etc.).
+    # Run the coroutine in a background thread so it gets its own loop and
+    # context, fully isolated from the notebook kernel's event loop.
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(asyncio.run, coro)
         try:
-            return loop.run_until_complete(task)
+            return future.result()
         except KeyboardInterrupt:
-            task.cancel()
-            # Give the task a chance to process the cancellation
-            try:
-                loop.run_until_complete(task)
-            except (asyncio.CancelledError, KeyboardInterrupt):
-                pass
+            # Can't cancel a running Future directly; re-raise so that
+            # run() / run_monitor() picks it up via their try/except.
             raise
 
 

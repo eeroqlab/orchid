@@ -191,11 +191,11 @@ def read_limit_log(data_dir: str | Path) -> list[dict]:
 
 
 def read_events(data_dir: str | Path) -> list[dict]:
-    """Read parameter change events recorded during a monitor run.
+    """Read controller change events recorded during a monitor run.
 
     Returns a list of event dicts, each with keys:
     ``time`` (Unix timestamp), ``elapsed`` (seconds from start),
-    ``param`` (parameter name), ``value`` (value that was set).
+    ``param`` (controller name), ``value`` (value that was set).
     Returns an empty list if no events were recorded.
 
     Parameters
@@ -266,7 +266,7 @@ def _format_procedure_summary(d: dict) -> str:
             n = sw["n"]
             rev_tag = " ↔" if sw.get("reverse") else ""
             if sw["type"] == "multi":
-                for j, p in enumerate(sw["parameters"]):
+                for j, p in enumerate(sw["controllers"]):
                     rng = f"{p['min']:>10.4g} → {p['max']:<10.4g}"
                     unit_str = p.get("unit") or ""
                     if j == 0:
@@ -276,7 +276,7 @@ def _format_procedure_summary(d: dict) -> str:
             else:
                 rng = f"{sw['min']:>10.4g} → {sw['max']:<10.4g}"
                 unit_str = sw.get("unit") or ""
-                rows.append((f"  [{ax}] {sw['parameter']}", rng, f"{n} pts{rev_tag}", unit_str))
+                rows.append((f"  [{ax}] {sw['controller']}", rng, f"{n} pts{rev_tag}", unit_str))
 
     # ── Readouts ──────────────────────────────────────────
     rows.append(BLANK)

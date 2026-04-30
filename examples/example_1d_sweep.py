@@ -9,7 +9,7 @@ Demonstrates the full orchid pipeline:
 """
 
 import numpy as np
-from orchid import (
+from src.orchid import (
     DataKind,
     ExperimentContext,
     ExperimentRunner,
