@@ -48,15 +48,15 @@ vs = VoltageSource()
 
 # 2. Bench — register instruments, controllers, readouts
 bench = Bench(data_root="./data", metadata={"sample": "chip_A1"})
-ctx.add_instrument("vs", vs)
-ctx.add_controller("Vgt", instrument="vs", attr="voltage", unit="V")
-ctx.add_readout("signal", kind="scalar", get_func=lambda: vs.voltage ** 2, unit="V")
+bench.add_instrument("vs", vs)
+bench.add_controller("Vgt", instrument="vs", attr="voltage", unit="V")
+bench.add_readout("signal", kind="scalar", get_func=lambda: vs.voltage ** 2, unit="V")
 
 # 3. Interact
-ctx["Vgt"] = 0.5        # set
-print(ctx["Vgt"])        # read -> 0.5
-print(ctx["signal"])     # measure -> 0.25
-ctx.snapshot()           # print table of all values
+bench["Vgt"] = 0.5        # set
+print(bench["Vgt"])        # read -> 0.5
+print(bench["signal"])     # measure -> 0.25
+bench.snapshot()           # print table of all values
 
 # 4. Define and run a sweep
 proc = Procedure(
