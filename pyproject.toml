@@ -15,6 +15,8 @@ dependencies = [
     "numpy",
     "tqdm",
     "nest_asyncio",
+    "plotly>=5.0",
+    "dash>=2.0"
     "zarro",
 ]
 

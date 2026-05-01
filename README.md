@@ -46,10 +46,10 @@ class VoltageSource:
 
 vs = VoltageSource()
 
-# 2. Context — register instruments, parameters, readouts
-ctx = ExperimentContext(data_root="./data", metadata={"sample": "chip_A1"})
+# 2. Bench — register instruments, controllers, readouts
+bench = Bench(data_root="./data", metadata={"sample": "chip_A1"})
 ctx.add_instrument("vs", vs)
-ctx.add_parameter("Vgt", instrument="vs", attr="voltage", unit="V")
+ctx.add_controller("Vgt", instrument="vs", attr="voltage", unit="V")
 ctx.add_readout("signal", kind="scalar", get_func=lambda: vs.voltage ** 2, unit="V")
 
 # 3. Interact
@@ -61,7 +61,7 @@ ctx.snapshot()           # print table of all values
 # 4. Define and run a sweep
 proc = Procedure(
     name="gate_sweep",
-    context=ctx,
+    bench=bench,
     sweeps=[Sweep("Vgt", np.linspace(0, 1, 101))],
     readouts=["signal"],
 )
@@ -76,13 +76,13 @@ print(z["signal"][:])    # shape (101,)
 ## Key Concepts
 
 ```
-InstrumentAdapter          Parameter / Readout
+InstrumentAdapter          Controller / Readout
  (pymeasure/qcodes/       (named controls and
   custom drivers)           measurement channels)
         \                       /
          \                     /
-       ExperimentContext
-       ctx["Vgt"] = 0.4  |  ctx.snapshot()
+       Bench
+       bench["Vgt"] = 0.4  |  bench.snapshot()
                 |
         Procedure / MonitorProcedure
         (sweeps, readouts, hooks, write_mode)
@@ -97,9 +97,9 @@ InstrumentAdapter          Parameter / Readout
 | Class                | Role                                                  |
 |----------------------|-------------------------------------------------------|
 | `InstrumentAdapter`  | Unified get/set wrapper for any instrument backend    |
-| `Parameter`          | Named control mapped to an instrument channel         |
+| `Controller`          | Named control mapped to an instrument channel         |
 | `Readout`            | Read-only measurement channel (scalar, trace, image)  |
-| `ExperimentContext`  | Container for all instruments, parameters, readouts   |
+| `Bench`  | Container for all instruments, parameters, readouts   |
 | `Procedure`          | Defines sweeps, readouts, hooks, and write strategy   |
 | `MonitorProcedure`   | Time-series monitoring with interval and stop logic   |
 | `ExperimentRunner`   | Executes procedures, manages data flow to zarro       |
@@ -129,4 +129,6 @@ Full tutorial, cookbook, and API reference: **[docs/orchid.md](docs/orchid.md)**
 - `tqdm`
 - `tabulate`
 - `zarro`
-- Optional: `plotly` (for live plotting), `qcodes`, `pymeasure`
+- `plotly`, `dash` (for live plotting),
+- `qcodes`,
+- `pymeasure`
