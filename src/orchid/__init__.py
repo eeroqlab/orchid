@@ -5,7 +5,7 @@ from .controller import DataKind, Controller, LimitPolicy, LimitEntry, Readout
 from .bench import Bench
 from .procedure import ErrorPolicy, MonitorProcedure, MultiSweep, Procedure, Sweep, WriteMode
 from .runner import ExperimentRunner
-from .plotting import EventLineConfig, LivePlotter, PlotSpec
+from .plotting import EventLineConfig, LivePlotter, DashPlotter, PlotterBase, PlotSpec, TaipyPlotter
 from .utils import apply_theme, read_events, read_limit_log, read_metadata, read_procedure, update_metadata, PALETTE
 
 __all__ = [
@@ -24,7 +24,10 @@ __all__ = [
     "WriteMode",
     "ExperimentRunner",
     "EventLineConfig",
+    "PlotterBase",
+    "DashPlotter",
     "LivePlotter",
+    "TaipyPlotter",
     "PlotSpec",
     "apply_theme",
     "PALETTE",

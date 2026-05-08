@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .instrument import InstrumentAdapter
-from .controller import DataKind, Controller, Readout
+from .controller import DataKind, Controller, LimitPolicy, Readout
 
 
 @dataclass
@@ -75,6 +75,8 @@ class Bench:
         get_func=None,
         set_func=None,
         unit: str | None = None,
+        limits: tuple[float, float] | None = None,
+        limit_policy: LimitPolicy = LimitPolicy.WARN
     ) -> Controller:
         """Register a control parameter.
 
@@ -100,6 +102,8 @@ class Bench:
             get_func=get_func,
             set_func=set_func,
             unit=unit,
+            limits=limits,
+            limit_policy=limit_policy,
         )
         self.controllers[name] = ctrl
         return ctrl

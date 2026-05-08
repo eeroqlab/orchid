@@ -45,7 +45,9 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [MonitorProcedure](#monitorprocedure)
   - [EventLineConfig](#eventlineconfig)
   - [PlotSpec](#plotspec)
-  - [LivePlotter](#liveplotter)
+  - [PlotterBase](#plotterbase)
+  - [DashPlotter / LivePlotter](#dashplotter--liveplotter)
+  - [TaipyPlotter](#taipyplotter)
   - [WriteMode](#writemode)
   - [ErrorPolicy](#errorpolicy)
   - [ExperimentRunner](#experimentrunner)
@@ -69,7 +71,7 @@ pip install -e ".[qcodes]"      # adds qcodes
 pip install -e ".[pymeasure]"   # adds pymeasure
 ```
 
-**Dependencies:** `numpy`, `tqdm`, `zarro`, `tabulate`
+**Dependencies:** `numpy`, `tqdm`, `plotly`, `dash`, `zarro`, `tabulate`
 
 ---
 
@@ -747,7 +749,9 @@ print(meta["T_mc"])       # 0.015
 
 ### Step 7: Live Plotting
 
-Orchid provides built-in live plotting using a Dash server that opens in a **separate browser window**. The plots update in real time as data is acquired. Create a `LivePlotter` with one or more `PlotSpec` objects and pass it to the runner.
+Orchid provides built-in live plotting using a Dash server that opens in a **separate browser window**. The plots update in real time as data is acquired. Create a `DashPlotter` (or its alias `LivePlotter`) with one or more `PlotSpec` objects and pass it to the runner.
+
+The plotter architecture separates data logic from the display backend: `PlotterBase` holds all figure-building and data-update code; `DashPlotter` adds the Dash/Werkzeug server on top. You can subclass `PlotterBase` directly to add other backends (e.g. Taipy) without touching the runner.
 
 #### 1D sweep — line plot
 
@@ -1848,65 +1852,195 @@ Describes one subplot in a `LivePlotter`.
 
 ---
 
-### LivePlotter
+### PlotterBase
 
 ```python
-from orchid import LivePlotter
+from orchid import PlotterBase
 ```
 
-Live plotting via a Dash server in a separate browser window.
+Abstract base class for live plotters. Holds all figure-building and data-update logic — no server code. Subclass it to add a new display backend; you only need to implement three things:
 
-| Argument          | Type                       | Default              | Description                          |
-|-------------------|----------------------------|----------------------|--------------------------------------|
-| `plots`           | `list[PlotSpec]`           | required             | Subplot specifications               |
-| `port`            | `int`                      | `8050`               | Dash server port                     |
-| `height`          | `int`                      | `350`                | Height in pixels per subplot         |
-| `width`           | `int`                      | `700`                | Figure width in pixels               |
-| `open_browser`    | `bool`                     | `True`               | Auto-open browser on start           |
-| `update_interval` | `int`                      | `500`                | Dash polling interval in ms          |
-| `event_line`      | `EventLineConfig` or `None`| `EventLineConfig()`  | Style for parameter-change markers   |
-| `max_display_pts` | `int`                      | `5000`               | Rolling window size for monitor line plots. For sweep plots the buffer is sized exactly to the inner sweep length. |
+```python
+class MyPlotter(PlotterBase):
+    def _start_server(self) -> None: ...   # start your server
+    def stop(self, _silent=False) -> None: ...   # stop it
+    @property
+    def is_running(self) -> bool: ...      # check if alive
+```
+
+Override `on_data_changed()` to push updates to your server after each data write:
+
+```python
+    def on_data_changed(self) -> None:
+        # e.g. Taipy: broadcast_callback(self._gui, lambda s: ...)
+        # e.g. Dash: self._data_version += 1  (already done in DashPlotter)
+```
 
 #### Lifecycle methods (called by the runner)
 
-| Method / Property                         | Description                      |
-|-------------------------------------------|----------------------------------|
-| `setup(proc)`                             | Before experiment — resets figure state (server kept alive if already running), creates new figure dict |
-| `update_point(index, data, sweep_values)` | After every measurement point    |
-| `update_sweep(outer_index, data, sweep_values)` | After each inner sweep completes |
-| `update_plane(outer_index, data, sweep_values)` | After each 2D plane completes |
-| `update_monitor(sample_idx, data, timestamp)` | After each append (monitors). `x="_time"` auto-scales to s/min/hr from zero. |
-| `notify_event(timestamp, param, value)`   | Draw a vertical event line on all `x="_time"` subplots. Called automatically by the runner. |
-| `stop()`                                  | Stop refreshing and shut down the Dash server, freeing the port. Called automatically by the runner after each experiment. |
-| `is_running` *(property)*                 | `True` if the Dash server is currently running |
+| Method / Property                              | Description                                                                 |
+|------------------------------------------------|-----------------------------------------------------------------------------|
+| `setup(proc)`                                  | Reset state, build figure dict, call `_start_server()` if not running      |
+| `update_point(index, data, sweep_values)`      | After every measurement point                                               |
+| `update_sweep(outer_index, data, sweep_values)`| After each inner sweep completes                                            |
+| `update_plane(outer_index, data, sweep_values)`| After each 2D plane completes                                               |
+| `update_monitor(sample_idx, data, timestamp)`  | After each monitor sample. `x="_time"` auto-scales to s/min/hr from zero.  |
+| `notify_event(timestamp, param, value)`        | Draw a vertical event line on all `x="_time"` subplots                      |
+| `finalize()`                                   | Mark experiment done (stops polling; server stays up for zoom/pan)          |
+| `stop()`                                       | *(abstract)* Stop server, free resources                                    |
+| `is_running` *(property)*                      | *(abstract)* `True` if the server is running                                |
+| `on_data_changed()`                            | Hook called after every write to `_fig_dict`. No-op in base; override for push/poll. |
 
-Each subplot only refreshes when the event matches its `update_every` setting. For example, a `PlotSpec` with `update_every="point"` will update on `update_point()` calls but ignore `update_sweep()` and `update_plane()` calls.
+#### Data helpers (available to subclasses)
 
-**Reusable across experiments:** `setup()` resets all figure state but keeps the Dash server alive, so the browser reconnects seamlessly without a page reload. `stop()` is called automatically by the runner after each experiment completes or is interrupted; call it manually to free the port entirely.
+| Method                                          | Description                                         |
+|-------------------------------------------------|-----------------------------------------------------|
+| `build_figure_dict(proc, n) -> dict`            | Build initial Plotly figure as a plain dict         |
+| `dispatch(event, index, data, sweep_values)`    | Route update to matching subplots by `update_every` |
+| `update_line(spec_idx, spec, data, sweep_values)` | Update a line trace buffer                        |
+| `update_heatmap(spec_idx, spec, index, data)`   | Fill one row/cell of a heatmap                      |
+| `update_live_trace(spec_idx, spec, data)`       | Overwrite a live trace                              |
+| `update_trace_heatmap(spec_idx, spec, index, data)` | Fill one column of a trace heatmap              |
+| `resolve_col(z_col, readout) -> int or None`    | Resolve `z_col` string/int/None to a column index   |
+| `extract_col(raw, z_col, readout) -> ndarray`   | Extract one channel from a raw readout array        |
+| `format_elapsed(seconds) -> (value, unit)`      | *(static)* Scale seconds to s/min/hr                |
+| `unit_divisor(unit) -> float`                   | *(static)* Seconds per display unit                 |
+
+#### Constructor parameters
+
+| Argument          | Type                       | Default             | Description                          |
+|-------------------|----------------------------|---------------------|--------------------------------------|
+| `plots`           | `list[PlotSpec]`           | required            | Subplot specifications               |
+| `height`          | `int`                      | `350`               | Height in pixels per subplot         |
+| `width`           | `int`                      | `700`               | Figure width in pixels               |
+| `open_browser`    | `bool`                     | `True`              | Auto-open browser when server starts |
+| `event_line`      | `EventLineConfig` or `None`| `EventLineConfig()` | Style for parameter-change markers   |
+| `max_display_pts` | `int`                      | `5000`              | Rolling window size for monitor line plots |
+
+---
+
+### DashPlotter / LivePlotter
+
+```python
+from orchid import DashPlotter   # preferred
+from orchid import LivePlotter   # backward-compat alias: LivePlotter = DashPlotter
+```
+
+Concrete implementation of `PlotterBase` using a Dash/Werkzeug server. The browser polls for updates every `update_interval` milliseconds.
+
+Adds two constructor arguments on top of `PlotterBase`:
+
+| Argument          | Type  | Default | Description                                  |
+|-------------------|-------|---------|----------------------------------------------|
+| `port`            | `int` | `8050`  | Dash server port                             |
+| `update_interval` | `int` | `500`   | Browser polling interval in milliseconds     |
+
+All `PlotterBase` constructor arguments (`plots`, `height`, `width`, `open_browser`, `event_line`, `max_display_pts`) are also accepted.
+
+#### Additional methods
+
+| Method / Property | Description                                                                                     |
+|-------------------|-------------------------------------------------------------------------------------------------|
+| `stop()`          | Shut down the Dash server and free the port. Called automatically by the runner after each run. |
+| `is_running`      | `True` if the Dash server thread is alive                                                       |
+
+**Reusable across experiments:** `setup()` resets figure state but keeps the server alive, so the browser reconnects without a page reload. Call `stop()` manually to free the port entirely.
 
 #### Time axis formatting
 
-When `x="_time"` is used (monitoring mode), the x-axis shows elapsed time starting from zero with auto-scaling units:
+When `x="_time"` is used (monitoring mode), the x-axis shows elapsed time from zero with auto-scaling units:
 
-| Elapsed time | x-axis unit | Label        |
-|--------------|-------------|--------------|
-| < 2 minutes  | seconds     | Time (s)     |
-| < 2 hours    | minutes     | Time (min)   |
-| >= 2 hours   | hours       | Time (hr)    |
+| Elapsed time | x-axis unit | Label      |
+|--------------|-------------|------------|
+| < 2 minutes  | seconds     | Time (s)   |
+| < 2 hours    | minutes     | Time (min) |
+| ≥ 2 hours    | hours       | Time (hr)  |
 
-The label updates automatically as time progresses. Existing data points are rescaled when the unit changes.
+The label updates automatically. Existing data points are rescaled when the unit changes.
 
 #### Usage
 
 ```python
-plotter = LivePlotter([PlotSpec(x="Vgt", y="lockin_X")])
+from orchid import DashPlotter, PlotSpec
+
+plotter = DashPlotter([PlotSpec(x="Vgt", y="lockin_X")])
 runner.run(proc, plotter=plotter)
 # Browser opens at http://localhost:8050 with live-updating plot
 
 plotter.stop()  # shut down server to free port (optional)
 ```
 
-Requires `plotly` and `dash` (install with `pip install orchid[plot]`).
+Requires `plotly` and `dash` (included in the default dependencies).
+
+---
+
+### TaipyPlotter
+
+Push-based live plotting backend using [Taipy GUI](https://docs.taipy.io/en/latest/).  
+Unlike `DashPlotter` (which polls for changes), `TaipyPlotter` pushes each update directly to every connected browser tab via WebSocket — zero polling latency.
+
+```python
+class TaipyPlotter(PlotterBase)
+```
+
+**Constructor parameters** — same as `PlotterBase` plus:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `port` | `int` | `5000` | TCP port for the Taipy GUI server |
+| `host` | `str` | `"localhost"` | Hostname / IP to bind |
+
+**Usage:**
+
+```python
+from orchid import TaipyPlotter, PlotSpec
+
+# 1-D sweep
+plotter = TaipyPlotter([PlotSpec(x="Vgt", y="lockin_X")])
+runner.run(proc, plotter=plotter)
+# Browser opens at http://localhost:5000
+
+# 2-D sweep — heatmap auto-detected
+plotter = TaipyPlotter([PlotSpec(x="fac", y="lockin_X")], port=5001)
+runner.run(proc_2d, plotter=plotter)
+
+# Multiple subplots
+plotter = TaipyPlotter([
+    PlotSpec(x="Vgt", y="lockin_X"),
+    PlotSpec(x="Vgt", y="lockin_Y"),
+])
+
+plotter.stop()   # shut down server (optional)
+```
+
+**How updates work:**
+
+Every time the experiment writes new data, `PlotterBase` calls `on_data_changed()`.  
+`TaipyPlotter` deep-copies `_fig_dict` for snapshot safety, then calls:
+
+```python
+broadcast_callback(gui, lambda state: setattr(state, "figure", fig_snapshot))
+```
+
+This sends the new figure to **all** browser tabs simultaneously over WebSocket — no polling interval, no stale reads.
+
+**Installation:**
+
+```bash
+pip install "orchid[taipy]"
+# or directly:
+pip install "taipy-gui>=3.1"
+```
+
+**DashPlotter vs TaipyPlotter — when to choose which:**
+
+| | DashPlotter | TaipyPlotter |
+|---|---|---|
+| Update mechanism | Poll every 500 ms | Push (WebSocket) |
+| Extra dependency | `dash`, `plotly` | `taipy-gui` |
+| Multi-tab support | Each tab polls independently | All tabs update in sync |
+| Default port | 8050 | 5000 |
+| Alias | `LivePlotter` | — |
 
 ---
 
@@ -1971,7 +2105,7 @@ All methods return the `Path` to the output data directory.
 | Argument        | Type                    | Default | Description                                   |
 |-----------------|-------------------------|---------|-----------------------------------------------|
 | `procedure`     | `Procedure`             | required| The sweep procedure                           |
-| `plotter`       | `LivePlotter` or `None` | `None`  | Live plotter                                  |
+| `plotter`       | `PlotterBase` or `None` | `None`  | Live plotter (any `PlotterBase` subclass)     |
 | `print_summary` | `bool`                  | `False` | If `True`, print the procedure summary table before running. |
 | `return_path`   | `bool`                  | `False` | If `True`, return the `Path` to the saved data directory (`run()` only). |
 
@@ -2228,4 +2362,23 @@ data/0001/
                      |  vault.zarr +        |
                      |  metadata.yaml       |
                      +-----------------------+
+
+Live plotting (optional, passed to runner as plotter=...):
+
+              +----------------------------+
+              |       PlotterBase          |
+              |  build_figure_dict()       |
+              |  update_line/heatmap/...   |
+              |  on_data_changed() [hook]  |
+              |  _start_server() [abstract]|
+              +-------------+--------------+
+                            |
+              +-------------+--------------+
+              |                            |
+    +---------+----------+    +-----------+-----------+
+    |    DashPlotter      |    |    TaipyPlotter       |
+    |  (LivePlotter)      |    |                       |
+    |  Werkzeug + Dash    |    |  taipy.gui + push     |
+    |  dcc.Interval poll  |    |  broadcast_callback   |
+    +---------------------+    +-----------------------+
 ```
