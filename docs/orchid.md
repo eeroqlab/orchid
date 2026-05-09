@@ -26,6 +26,7 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [Hysteresis (Forward + Backward)](#hysteresis-forward--backward)
   - [Time-Series Monitoring](#time-series-monitoring)
   - [Controller Limits](#controller-limits)
+  - [Controller Bindings](#controller-bindings)
   - [Controller Event Logging](#controller-event-logging)
   - [Background Monitoring](#background-monitoring)
   - [Custom Hooks](#custom-hooks)
@@ -308,6 +309,7 @@ bench.add_controller(
 | Non-standard access pattern            | `get_func=..., set_func=...`                |
 | Read-only value                        | `get_func=...` (no `set_func`)              |
 | Computed / derived quantity            | `get_func=..., set_func=...` with logic     |
+| One logical control for multiple channels | `add_controller_binding("name", [...])`  |
 
 #### Readouts
 
@@ -1214,6 +1216,27 @@ len(bench.controllers["Vgt"].limit_log)  # how many points were clamped
 
 ---
 
+### Controller Bindings
+
+Use `Bench.add_controller_binding()` when one logical control should fan out to several existing physical controllers. Setting the binding applies the same value to every bound controller. Reading the binding returns a dictionary of current bound-controller values.
+
+```python
+bench.add_controller("stp", instrument="yoko1", attr="voltage", unit="V")
+bench.add_controller("stm", instrument="yoko2", attr="voltage", unit="V")
+
+bench.add_controller_binding("reservoir_v", ["stp", "stm"])
+
+bench["reservoir_v"] = -0.25
+print(bench["reservoir_v"])
+# {"stp": -0.25, "stm": -0.25}
+```
+
+Bindings are regular `Controller` objects, so they can be used in `Sweep` or `MultiSweep`. Bound physical controllers still enforce their own limits when they receive the value.
+
+`add_controller_binding()` raises `KeyError` if any bound name is missing and `ValueError` if the bound-controller list is empty.
+
+---
+
 ### Controller Event Logging
 
 While a background monitor is running, every `bench["param"] = value` call is automatically recorded as a timestamped event. Events are saved to `events.yaml` alongside the data when the monitor finishes.
@@ -1604,9 +1627,13 @@ Central container for the entire lab bench configuration.
 
 Register an instrument. `backend` can be `"auto"`, `"pymeasure"`, `"qcodes"`, or `"custom"`.
 
-**`add_controller(name, instrument=None, attr=None, get_func=None, set_func=None, unit=None) -> Controller`**
+**`add_controller(name, instrument=None, attr=None, get_func=None, set_func=None, unit=None, limits=None, limit_policy=LimitPolicy.WARN) -> Controller`**
 
-Register a control parameter. `instrument` can be an `InstrumentAdapter` object or the string name of a registered instrument.
+Register a control parameter. `instrument` can be an `InstrumentAdapter` object or the string name of a registered instrument. `limits` is an optional inclusive `(lo, hi)` range and `limit_policy` controls clamp, raise, or log behavior.
+
+**`add_controller_binding(name, gate_names, *, unit=None) -> Controller`**
+
+Register a virtual controller that sets all controllers named in `gate_names` to the same value and reads them back as `{controller_name: value}`. If `unit` is omitted, it is inferred from bound controllers.
 
 **`add_readout(name, kind, get_func, shape=None, unit=None, contains=None) -> Readout`**
 
