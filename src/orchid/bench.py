@@ -76,7 +76,7 @@ class Bench:
         set_func=None,
         unit: str | None = None,
         limits: tuple[float, float] | None = None,
-        limit_policy: LimitPolicy = LimitPolicy.WARN
+        limit_policy: LimitPolicy = LimitPolicy.WARN,
     ) -> Controller:
         """Register a control parameter.
 
@@ -92,6 +92,10 @@ class Bench:
             Custom getter/setter (override instrument access).
         unit : str, optional
             Physical unit.
+        limits : tuple[float, float], optional
+            Inclusive bounds for the controller.
+        limit_policy : LimitPolicy
+            How to handle controller limit violations.
         """
         if isinstance(instrument, str):
             instrument = self.instruments[instrument]
@@ -107,6 +111,58 @@ class Bench:
         )
         self.controllers[name] = ctrl
         return ctrl
+
+    def add_controller_binding(
+        self,
+        name: str,
+        gate_names: list[str],
+        *,
+        unit: str | None = None,
+    ) -> Controller:
+        """Register a virtual controller bound to existing controllers.
+
+        Setting the virtual controller sets all bound controllers to the same
+        value. Reading it returns a ``{controller_name: value}`` mapping.
+
+        Parameters
+        ----------
+        name : str
+            Name for the virtual controller.
+        gate_names : list[str]
+            Existing controller names to bind.
+        unit : str, optional
+            Unit for the virtual controller. If omitted, inferred from bound
+            controllers.
+        """
+        if not gate_names:
+            raise ValueError("add_controller_binding requires at least one controller")
+
+        missing = [gate for gate in gate_names if gate not in self.controllers]
+        if missing:
+            raise KeyError(f"Cannot bind {name!r}: missing controllers {missing}")
+
+        physical = [self.controllers[gate] for gate in gate_names]
+        if unit is None:
+            units = list(dict.fromkeys(ctrl.unit for ctrl in physical if ctrl.unit))
+            unit = (
+                " / ".join(units)
+                if len(units) > 1
+                else (units[0] if units else None)
+            )
+
+        def set_bound(value):
+            for ctrl in physical:
+                ctrl.set(value)
+
+        def get_bound():
+            return {ctrl.name: ctrl.get() for ctrl in physical}
+
+        return self.add_controller(
+            name,
+            get_func=get_bound,
+            set_func=set_bound,
+            unit=unit,
+        )
 
     def add_readout(
         self,

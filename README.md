@@ -10,6 +10,7 @@ Orchid connects your lab instruments (pymeasure, qcodes, or custom drivers) to a
 
 - **Multi-backend instruments** — pymeasure, qcodes, and custom Python objects with auto-detection
 - **pymeasure-style access** — `ctx["Vgt"] = 0.4` to set, `ctx["Vgt"]` to read
+- **Controller limits and bindings** — clamp, log, raise, or bind one logical control to multiple physical channels
 - **1D / 2D / 3D sweeps** with snake scan and hysteresis support
 - **Time-series monitoring** with configurable interval, duration, and stop conditions
 - **Flexible write modes** — write per point, per sweep, per plane, or all at once
