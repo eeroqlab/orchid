@@ -186,14 +186,22 @@ class Controller:
 class Readout:
     """A read-only measurement channel (e.g. VNA trace, lockin reading).
 
+    Supply either ``get_func`` **or** ``instrument + attr``; the latter is
+    fully serializable by :py:meth:`Bench.save` / :py:meth:`Bench.load`.
+
     Parameters
     ----------
     name : str
         Label, e.g. "S21", "lockin_X".
     kind : DataKind
         SCALAR, TRACE, or IMAGE.
-    get_func : callable
+    get_func : callable, optional
         Function that acquires and returns the measurement data.
+        Mutually exclusive with ``instrument + attr``.
+    instrument : InstrumentAdapter, optional
+        Instrument to read from.  Used together with ``attr``.
+    attr : str, optional
+        Attribute name on the instrument.  Used together with ``instrument``.
     shape : tuple, optional
         Trailing shape for TRACE (N,) or IMAGE (H, W). Required for non-scalar.
     unit : str, optional
@@ -206,12 +214,24 @@ class Readout:
 
     name: str
     kind: DataKind
-    get_func: Callable[[], Any] = None
+    get_func: Callable[[], Any] | None = None
+    instrument: InstrumentAdapter | None = None
+    attr: str | None = None
     shape: tuple[int, ...] | None = None
     unit: str | None = None
     contains: str | list[str] | None = None
 
     def __post_init__(self):
+        has_func = self.get_func is not None
+        has_instr = self.instrument is not None and self.attr is not None
+        if not has_func and not has_instr:
+            raise ValueError(
+                f"Readout {self.name!r}: provide either get_func or instrument+attr"
+            )
+        if has_func and has_instr:
+            raise ValueError(
+                f"Readout {self.name!r}: provide get_func OR instrument+attr, not both"
+            )
         if self.kind != DataKind.SCALAR and self.shape is None:
             raise ValueError(
                 f"Readout {self.name!r}: shape is required for {self.kind} kind"
@@ -219,12 +239,17 @@ class Readout:
 
     def read(self) -> np.ndarray | float:
         """Acquire one measurement."""
-        return self.get_func()
+        if self.get_func is not None:
+            return self.get_func()
+        return self.instrument.get(self.attr)
 
     async def aread(self) -> np.ndarray | float:
-        if inspect.iscoroutinefunction(self.get_func):
-            return await self.get_func()
-        return await asyncio.to_thread(self.get_func)
+        if self.get_func is not None:
+            if inspect.iscoroutinefunction(self.get_func):
+                return await self.get_func()
+            return await asyncio.to_thread(self.get_func)
+        return await self.instrument.aget(self.attr)
 
     def __repr__(self) -> str:
-        return f"Readout({self.name!r}, {self.kind}, shape={self.shape})"
+        src = self.attr if self.attr else "callable"
+        return f"Readout({self.name!r}, {self.kind}, src={src!r}, shape={self.shape})"

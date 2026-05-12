@@ -33,6 +33,8 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [Mixed Readouts (Scalar + Trace)](#mixed-readouts-scalar--trace)
   - [Async Usage](#async-usage)
   - [Inspecting a Procedure](#inspecting-a-procedure)
+  - [Saving and Loading Bench Configuration](#saving-and-loading-bench-configuration)
+  - [Interactive Control Panel](#interactive-control-panel)
 - [API Reference](#api-reference)
   - [InstrumentAdapter](#instrumentadapter)
   - [Controller](#controller)
@@ -49,6 +51,7 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [PlotterBase](#plotterbase)
   - [DashPlotter / LivePlotter](#dashplotter--liveplotter)
   - [TaipyPlotter](#taipyplotter)
+  - [ControlPanel](#controlpanel)
   - [WriteMode](#writemode)
   - [ErrorPolicy](#errorpolicy)
   - [ExperimentRunner](#experimentrunner)
@@ -176,6 +179,26 @@ When `backend="auto"` (the default), orchid inspects the class MRO to detect pym
 ```python
 bench.add_instrument("lockin", lockin)  # auto-detects qcodes
 ```
+
+#### Registering connection info for save/load
+
+Pass `args` and `kwargs` to record how the instrument was constructed. This allows `bench.save()` to write a fully self-contained YAML that `Bench.load()` can replay without any extra code:
+
+```python
+# pymeasure — single positional address arg
+bench.add_instrument("keithley", keithley,
+    args=["GPIB::24"])
+
+# qcodes — name + address as positional args
+bench.add_instrument("lockin", lockin,
+    args=["lockin", "GPIB::8"])
+
+# custom with keyword args
+bench.add_instrument("vs", vs,
+    kwargs={"port": "COM3", "timeout": 5000})
+```
+
+If `class_path` is omitted, orchid auto-detects it from `type(instrument).__module__`. Instruments defined directly in a Jupyter notebook (`__main__`) emit a warning and are saved as a stub — you must provide the importable path manually before using `Bench.load()`.
 
 #### Direct adapter creation
 
@@ -313,16 +336,20 @@ bench.add_controller(
 
 #### Readouts
 
-Readouts always use a `get_func` callable. The `kind` determines the data shape:
+Readouts can be defined with a `get_func` callable **or** with `instrument + attr` — just like controllers. The `instrument + attr` form is fully serializable by `bench.save()` / `Bench.load()`.
 
 ```python
-# Scalar readout (single number per point)
+# Scalar — get_func form (arbitrary logic, not serializable)
 bench.add_readout("lockin_X", kind="scalar",
     get_func=lockin_amplifier.read_x, unit="V")
 
+# Scalar — instrument+attr form (serializable)
+bench.add_readout("lockin_X", kind="scalar",
+    instrument="lockin", attr="x", unit="V")
+
 # Trace readout (1D array per point)
 bench.add_readout("mag", kind="trace", shape=(1601,),
-    get_func=vna.get_magnitude, unit="dB",
+    instrument="vna", attr="magnitude", unit="dB",
     contains="transmission magnitude")
 
 # Image readout (2D array per point — e.g. VNA returning freq + mag + phase)
@@ -404,6 +431,23 @@ Print only specific parameters or readouts by name:
 bench.snapshot(["Vgt", "lockin_X"])
 # explicit list overrides include_readouts; reads exactly what is named
 ```
+
+#### Saving and loading bench configuration
+
+`bench.save()` writes the full bench configuration to a YAML file — instrument class paths, connection args, all controllers and `instrument + attr` readouts, plus source hints for any custom callables. `Bench.load()` reads it back and re-instantiates everything via Python's `importlib` (no `eval`). Entries that cannot be auto-wired (custom `get_func`, failed connections, `__main__` classes) are collected as *stubs* — call `bench.show_stubs()` to review them.
+
+```python
+bench.save("bench.yaml")          # write once
+
+# In any future session:
+bench = Bench.load("bench.yaml")  # instruments connected, controllers wired
+# Bench loaded ← bench.yaml  ·  2 stubs — call bench.show_stubs()
+
+bench.show_stubs()    # compact table with source hints for custom callables
+bench["Vgt"] = 0.5
+```
+
+See the [Saving and Loading Bench Configuration](#saving-and-loading-bench-configuration) cookbook section for the full workflow, generated YAML format, and stub re-registration.
 
 #### Removing instruments, controllers, and readouts
 
@@ -1468,6 +1512,227 @@ Lambdas are noted but not serialised:
 
 Source extraction works for functions defined in `.py` files and in Jupyter notebook cells (IPython keeps cell source in memory). If source is unavailable, the function name and module are recorded as a fallback.
 
+### Saving and Loading Bench Configuration
+
+`bench.save()` / `Bench.load()` persist the entire bench setup as a human-readable YAML file, so you can reconnect to instruments and recreate all controllers and readouts in one line — no copy-pasting setup code between notebooks.
+
+#### What is and isn't serialized
+
+| Thing | Serialized | On load |
+|---|---|---|
+| Instrument class + connection args | ✅ | Auto-connected via `importlib` |
+| Controllers (`instrument + attr`) | ✅ | Fully wired |
+| Readouts (`instrument + attr`) | ✅ | Fully wired |
+| Custom `get_func` / `set_func` | ⚠️ source hint | Collected as stub — re-register manually |
+| `__main__` instruments | ⚠️ stub | Collected as stub — update YAML `class` field |
+| Failed connections | ⚠️ stub | Collected as stub — fix address and reload |
+
+Stubs are collected silently during `load()`. A single summary line tells you how many there are, and `bench.show_stubs()` displays them in a compact table.
+
+#### Full round-trip example
+
+```python
+# ── Session 1: first setup ─────────────────────────────────────────
+from pymeasure.instruments.keithley import Keithley2400
+from qcodes.instrument_drivers.stanford_research import SR830
+
+smu  = Keithley2400("GPIB::24")
+lockin = SR830("lockin", "GPIB::8")
+
+bench = Bench(data_root="./data", metadata={"sample": "chip_A1"})
+
+bench.add_instrument("smu",   smu,   args=["GPIB::24"])
+bench.add_instrument("lockin", lockin, args=["lockin", "GPIB::8"])
+
+bench.add_controller("Vbias", instrument="smu",   attr="source_voltage", unit="V",  limits=(-1, 1))
+bench.add_controller("fac",   instrument="lockin", attr="frequency",      unit="Hz")
+bench.add_readout(   "X",     kind="scalar", instrument="lockin", attr="x", unit="V")
+
+bench.save("bench.yaml")   # ← write once
+```
+
+```python
+# ── Session 2 onwards: one-liner ──────────────────────────────────
+bench = Bench.load("bench.yaml")
+# Bench loaded ← bench.yaml
+
+bench["Vbias"] = 0.1
+bench.snapshot()
+```
+
+#### Generated YAML
+
+```yaml
+bench:
+  data_root: ./data
+  metadata:
+    sample: chip_A1
+
+instruments:
+  smu:
+    class: pymeasure.instruments.keithley.Keithley2400
+    args: [GPIB::24]
+    kwargs: {}
+    backend: pymeasure
+  lockin:
+    class: qcodes.instrument_drivers.stanford_research.SR830
+    args: [lockin, GPIB::8]
+    kwargs: {}
+    backend: qcodes
+
+controllers:
+  Vbias:
+    instrument: smu
+    attr: source_voltage
+    unit: V
+    limits: [-1.0, 1.0]
+    limit_policy: warn
+  fac:
+    instrument: lockin
+    attr: frequency
+    unit: Hz
+    limits: null
+    limit_policy: warn
+
+readouts:
+  X:
+    kind: scalar
+    instrument: lockin
+    attr: x
+    shape: null
+    unit: V
+    contains: null
+```
+
+#### Stubs — entries that need manual re-registration
+
+`load()` is quiet: it collects everything it cannot auto-wire as a *stub* and prints a single summary line:
+
+```
+Bench loaded ← bench.yaml  ·  3 stubs — call bench.show_stubs()
+```
+
+Call `bench.show_stubs()` to see a compact table. Source strings for custom callables are truncated to the first line by default:
+
+```python
+bench.show_stubs()
+```
+
+```
+Name    Kind        Reason                       Info          Source (hint)
+------  ----------  ---------------------------  ------------  ----------------------------------------
+smu     instrument  connection failed: No VISA   —             —
+fac     controller  custom get_func/set_func     Hz  100…1e6   get: lambda: lockin.driver.frequency…
+                                                               set: lambda v: setattr(lockin.driver…
+power   readout     custom get_func              scalar  W     get: lambda: smu.current * smu.voltage…
+  (pass full_source=True to see complete source)
+```
+
+Pass `full_source=True` to unfold multiline source in full:
+
+```python
+bench.show_stubs(full_source=True)
+```
+
+For programmatic access:
+
+```python
+bench.stubs          # dict keyed by name
+bench.stubs["fac"]   # {'kind': 'controller', 'get_func_src': '...', ...}
+```
+
+#### Re-registering stubs
+
+After reviewing `show_stubs()`, re-add custom callables by hand:
+
+```python
+# Re-add a controller with custom get/set (unit and limits from the YAML hint)
+bench.add_controller("fac",
+    get_func=lambda: lockin.driver.frequency,
+    set_func=lambda v: setattr(lockin.driver, "frequency", v),
+    unit="Hz", limits=(100, 1e6))
+
+# Re-add a custom readout
+bench.add_readout("power", kind="scalar",
+    get_func=lambda: smu.current * smu.voltage, unit="W")
+```
+
+#### `__main__` instruments
+
+Instruments defined inline in a Jupyter notebook have `class = __main__.MyClass`, which cannot be imported. `bench.save()` records a stub in the YAML:
+
+```yaml
+instruments:
+  vs:
+    class: null
+    args: []
+    kwargs: {}
+    _note: "Set 'class' to the full module path before calling Bench.load()."
+```
+
+Move the class to an importable `.py` module, update the `class` field, and `Bench.load()` will connect it automatically on the next load.
+
+---
+
+### Interactive Control Panel
+
+`ControlPanel` opens a Dash/DAQ browser window with one row per controller — sliders for bounded controllers, numeric inputs for all. Writes are queued through a dedicated setter thread so the UI never blocks on slow instrument I/O.
+
+```python
+from orchid import ControlPanel
+
+panel = ControlPanel(bench, port=8051)
+panel.start()
+# Browser opens at http://localhost:8051
+```
+
+#### All controllers
+
+```python
+# Show all controllers registered in bench
+panel = ControlPanel(bench)
+
+# Show a specific subset
+panel = ControlPanel(bench, controllers=["Vgt", "Vbg", "fac"])
+```
+
+#### Programmatic set
+
+`panel.set()` is safe to call from any thread — from notebook cells, scripts, or other callbacks:
+
+```python
+panel.set("Vgt", 0.5)
+```
+
+#### Readback
+
+By default the panel polls each controller's current value every 2 s and displays it next to the input. Disable if reads are slow:
+
+```python
+panel = ControlPanel(bench, readback=False)
+panel = ControlPanel(bench, readback=True, readback_interval=5000)  # 5 s
+```
+
+#### Stopping
+
+```python
+panel.stop()
+print(panel.is_running)  # False
+```
+
+#### Integration with live plots
+
+Because `panel.set()` writes via `bench[name] = val`, every change fires the bench event log automatically. If a `LivePlotter` with `x="_time"` is running alongside, parameter changes appear as annotated vertical lines on the plot without any extra wiring.
+
+```python
+plotter = LivePlotter([PlotSpec(x="_time", y="lockin_X")])
+runner.run_monitor(monitor, plotter=plotter, background=True)
+
+panel = ControlPanel(bench)
+panel.start()
+# Adjust Vgt in the browser → event line appears on the live plot
+```
+
 ---
 
 ## API Reference
@@ -1488,11 +1753,12 @@ Thin wrapper normalizing pymeasure/qcodes/custom instruments into a uniform inte
 | `.from_custom(name, obj)`           | Wrap any Python object        |
 | `.auto(name, instrument)`           | Auto-detect backend from MRO  |
 
-| Attribute  | Type   | Description                    |
-|------------|--------|--------------------------------|
-| `name`     | `str`  | Human-readable instrument name |
-| `driver`   | `Any`  | Raw instrument object          |
-| `backend`  | `str`  | `"pymeasure"`, `"qcodes"`, or `"custom"` |
+| Attribute         | Type   | Description                                           |
+|-------------------|--------|-------------------------------------------------------|
+| `name`            | `str`  | Human-readable instrument name                        |
+| `driver`          | `Any`  | Raw instrument object                                 |
+| `backend`         | `str`  | `"pymeasure"`, `"qcodes"`, or `"custom"`              |
+| `connection_info` | `dict` | Serialization metadata: `{"class": "...", "args": [...], "kwargs": {...}}`. Populated by `Bench.add_instrument()` when `args`/`kwargs` are provided; used by `bench.save()`. |
 
 | Method                          | Description                                  |
 |---------------------------------|----------------------------------------------|
@@ -1568,16 +1834,18 @@ Each violation is stored as a `LimitEntry(index, requested, clamped)` named tupl
 from orchid import Readout
 ```
 
-A read-only measurement channel.
+A read-only measurement channel. Supply either `get_func` **or** `instrument + attr`; the latter is fully serializable by `bench.save()` / `Bench.load()`.
 
-| Argument   | Type                          | Default  | Description                            |
-|------------|-------------------------------|----------|----------------------------------------|
-| `name`     | `str`                         | required | Label (e.g. `"S21"`)                   |
-| `kind`     | `DataKind`                    | required | `SCALAR`, `TRACE`, or `IMAGE`          |
-| `get_func` | `callable`                    | `None`   | Acquisition function                   |
-| `shape`    | `tuple` or `None`             | `None`   | Required for `TRACE` and `IMAGE`       |
-| `unit`     | `str` or `None`               | `None`   | Physical unit                          |
-| `contains` | `str`, `list[str]`, or `None` | `None`   | For `IMAGE` readouts: list of column names (e.g. `["f", "mag", "phase"]`) enabling `z_col` string lookup in `PlotSpec`. For other kinds: plain string description. |
+| Argument     | Type                          | Default  | Description                            |
+|--------------|-------------------------------|----------|----------------------------------------|
+| `name`       | `str`                         | required | Label (e.g. `"S21"`)                   |
+| `kind`       | `DataKind`                    | required | `SCALAR`, `TRACE`, or `IMAGE`          |
+| `get_func`   | `callable` or `None`          | `None`   | Acquisition function. Mutually exclusive with `instrument + attr`. |
+| `instrument` | `InstrumentAdapter` or `None` | `None`   | Instrument to read from. Used together with `attr`. |
+| `attr`       | `str` or `None`               | `None`   | Attribute name on the instrument. Used together with `instrument`. |
+| `shape`      | `tuple` or `None`             | `None`   | Required for `TRACE` and `IMAGE`       |
+| `unit`       | `str` or `None`               | `None`   | Physical unit                          |
+| `contains`   | `str`, `list[str]`, or `None` | `None`   | For `IMAGE` readouts: list of column names (e.g. `["f", "mag", "phase"]`) enabling `z_col` string lookup in `PlotSpec`. For other kinds: plain string description. |
 
 | Method                         | Description           |
 |--------------------------------|-----------------------|
@@ -1623,9 +1891,9 @@ Central container for the entire lab bench configuration.
 
 #### Methods
 
-**`add_instrument(name, instrument, backend="auto") -> InstrumentAdapter`**
+**`add_instrument(name, instrument, backend="auto", *, class_path=None, args=None, kwargs=None) -> InstrumentAdapter`**
 
-Register an instrument. `backend` can be `"auto"`, `"pymeasure"`, `"qcodes"`, or `"custom"`.
+Register an instrument. `backend` can be `"auto"`, `"pymeasure"`, `"qcodes"`, or `"custom"`. Pass `args` and/or `kwargs` to record how the instrument was constructed — this enables `bench.save()` / `Bench.load()` to reconnect it automatically. `class_path` overrides the auto-detected fully-qualified class name (useful when the detected path is wrong).
 
 **`add_controller(name, instrument=None, attr=None, get_func=None, set_func=None, unit=None, limits=None, limit_policy=LimitPolicy.WARN) -> Controller`**
 
@@ -1635,9 +1903,9 @@ Register a control parameter. `instrument` can be an `InstrumentAdapter` object 
 
 Register a virtual controller that sets all controllers named in `gate_names` to the same value and reads them back as `{controller_name: value}`. If `unit` is omitted, it is inferred from bound controllers.
 
-**`add_readout(name, kind, get_func, shape=None, unit=None, contains=None) -> Readout`**
+**`add_readout(name, kind, get_func=None, instrument=None, attr=None, shape=None, unit=None, contains=None) -> Readout`**
 
-Register a measurement readout. `kind` can be a `DataKind` enum or string (`"scalar"`, `"trace"`, `"image"`). For `IMAGE` readouts, pass `contains` as a `list[str]` of column names to enable named `z_col` selection in `PlotSpec`.
+Register a measurement readout. `kind` can be a `DataKind` enum or string (`"scalar"`, `"trace"`, `"image"`). Supply either `get_func` **or** `instrument + attr` (the latter is fully serializable by `bench.save()` / `Bench.load()`). `instrument` can be an `InstrumentAdapter` object or the string name of a registered instrument. For `IMAGE` readouts, pass `contains` as a `list[str]` of column names to enable named `z_col` selection in `PlotSpec`.
 
 **`remove_instrument(name) -> None`**
 
@@ -1663,6 +1931,33 @@ Print a formatted table of current values using `tabulate`. By default reads onl
 |--------------------|-----------------------|---------|------------------------------------------------------------------|
 | `names`            | `list[str]` or `None` | `None`  | Explicit name list; `None` = all (uses `include_readouts` flag)  |
 | `include_readouts` | `bool`                | `False` | When `names=None`, also read registered readouts. Ignored when `names` is given. |
+
+**`save(path) -> None`**
+
+Write the bench configuration to a YAML file. Instruments are stored by fully-qualified class path + constructor `args`/`kwargs`. Controllers and `instrument + attr` readouts are fully serialized. Custom `get_func` / `set_func` callables are not executable after load, but their source text is saved as a human-readable hint (`get_func_src` / `set_func_src` fields). Instruments defined in `__main__` emit a `UserWarning` and are written as a stub with `class: null`.
+
+**`Bench.load(path) -> Bench`** *(classmethod)*
+
+Reconstruct a bench from a YAML file saved by `save()`. Each instrument is instantiated by importing its class and calling it with the stored `args`/`kwargs`. Controllers and readouts are wired automatically. Entries that cannot be auto-loaded (custom callables, failed connections, `__main__` stubs) are collected silently in `bench._stubs`. A single summary line is printed if any stubs exist.
+
+```python
+bench.save("bench.yaml")
+bench = Bench.load("bench.yaml")
+# Bench loaded ← bench.yaml  ·  2 stubs — call bench.show_stubs()
+```
+
+**`show_stubs(*, full_source=False) -> None`**
+
+Print a compact table of all entries that need manual re-registration after `load()`. Each row shows the name, kind (`instrument` / `controller` / `readout`), reason it was skipped, metadata (unit, limits, shape), and a source hint. Source strings are truncated to the first line by default; pass `full_source=True` to print them in full.
+
+```python
+bench.show_stubs()                 # compact — first line of source only
+bench.show_stubs(full_source=True) # full multiline source
+```
+
+**`stubs`** *(property)* → `dict`
+
+Raw dict of stub entries keyed by name. Each value has at least `"kind"` and `"reason"`. Controller stubs include `"get_func_src"` / `"set_func_src"` when source was recorded at `save()` time.
 
 ---
 
@@ -2068,6 +2363,61 @@ pip install "taipy-gui>=3.1"
 | Multi-tab support | Each tab polls independently | All tabs update in sync |
 | Default port | 8050 | 5000 |
 | Alias | `LivePlotter` | — |
+
+---
+
+### ControlPanel
+
+```python
+from orchid import ControlPanel
+```
+
+Standalone Dash/DAQ browser UI for interactively adjusting bench controllers. Opens one row per controller: a slider (for controllers with `limits`) plus a numeric input. All instrument writes are routed through a dedicated setter thread with last-value-wins semantics, so the UI never blocks on slow instrument I/O.
+
+```python
+panel = ControlPanel(bench, port=8051)
+panel.start()   # opens http://localhost:8051
+panel.set("Vgt", 0.5)   # programmatic write from any thread
+panel.stop()
+```
+
+#### Constructor parameters
+
+| Argument            | Type            | Default | Description                                                     |
+|---------------------|-----------------|---------|-----------------------------------------------------------------|
+| `bench`             | `Bench`         | required| The lab bench whose controllers this panel controls             |
+| `port`              | `int`           | `8051`  | TCP port for the Dash server                                    |
+| `controllers`       | `list[str]` or `None` | `None` | Names to show; `None` shows all controllers in `bench`    |
+| `open_browser`      | `bool`          | `True`  | Open a browser tab automatically on `start()`                  |
+| `readback`          | `bool`          | `True`  | Poll and display each controller's current value periodically   |
+| `readback_interval` | `int`           | `2000`  | Readback poll period in milliseconds. Reads run in parallel via a thread pool. |
+
+#### Methods and properties
+
+| Method / Property | Description                                                                 |
+|-------------------|-----------------------------------------------------------------------------|
+| `start()`         | Start the setter thread and Dash server                                     |
+| `stop()`          | Drain the setter queue and shut down the server                             |
+| `set(name, value)`| Queue a controller write. Safe to call from any thread.                     |
+| `is_running`      | `True` while the Dash server thread is alive                                |
+
+#### UI behaviour
+
+- **Bounded controllers** (`limits` set): slider + numeric input. The slider fires only on mouse release (`updatemode="mouseup"`), preventing a flood of writes while dragging.
+- **Unbounded controllers**: numeric input only.
+- **Readback column**: shows the last value read back from the instrument (greyed monospace text).
+- **Status bar**: displays the last set (`name = value · N s ago`) and pending queue depth as pill badges.
+- **Last-value-wins**: if the same controller is changed multiple times before the setter thread drains, only the final value is applied.
+
+#### Event log integration
+
+`ControlPanel` writes via `bench[name] = val`, which fires the bench event log. If a `LivePlotter` with `x="_time"` is running, every manual panel adjustment automatically appears as an annotated vertical line on the plot.
+
+#### Requires `dash-daq`
+
+```bash
+pip install dash-daq
+```
 
 ---
 

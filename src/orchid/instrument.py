@@ -23,11 +23,16 @@ class InstrumentAdapter:
         The raw instrument object from pymeasure, qcodes, or custom code.
     backend : str
         One of "pymeasure", "qcodes", or "custom".
+    connection_info : dict, optional
+        Serialization metadata: ``{"class": "module.ClassName",
+        "args": [...], "kwargs": {...}}``.  Populated by
+        :py:meth:`Bench.add_instrument` and used by :py:meth:`Bench.save`.
     """
 
     name: str
     driver: Any
     backend: str = "custom"
+    connection_info: dict = field(default_factory=dict)
 
     @classmethod
     def from_pymeasure(cls, name: str, instrument: Any) -> InstrumentAdapter:
