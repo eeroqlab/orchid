@@ -281,6 +281,7 @@ class ControlPanel:
         app.title = "Orchid Control Panel"
         app.logger.setLevel(logging.ERROR)
 
+
         panel = self
         bench = self.bench
         ctrl_names = self._ctrl_names
@@ -370,7 +371,7 @@ class ControlPanel:
                         step=default_step,
                         marks=marks,
                         vertical=True,
-                        verticalHeight=260,
+                        verticalHeight=320,
                         updatemode="mouseup",
                         className="vslider",
                         tooltip={"placement": "right", "always_visible": False},

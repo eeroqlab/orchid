@@ -92,9 +92,12 @@ html, body {
 .tabs { display: flex; gap: 4px; margin-left: 14px; }
 .tab {
   border: 1px solid var(--border); background: transparent; color: var(--muted);
-  padding: 6px 12px; font-family: ui-monospace, Menlo, monospace; font-weight: 700;
+  padding: 6px calc(12px + 0.1em) 6px 12px; font-family: ui-monospace, Menlo, monospace; font-weight: 700;
   font-size: 11.5px; letter-spacing: 0.1em; cursor: pointer; border-radius: 2px;
   transition: border-color 0.15s, background 0.15s, color 0.15s;
+  white-space: nowrap; flex-shrink: 0; min-width: max-content;
+  appearance: none; -webkit-appearance: none; box-sizing: border-box;
+  padding-right: calc(12px + 0.1em) !important;
 }
 .tab:hover { border-color: var(--accent); color: var(--text); }
 .tab-on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--text); }
@@ -168,36 +171,83 @@ html, body {
 .sp-tag  { color: var(--muted); font-weight: 700; }
 .sp-text { color: var(--text);  font-weight: 600; font-variant-numeric: tabular-nums; }
 
-/* ── Vertical slider (dcc.Slider overrides) ─────────────── */
-.vslider { flex: 1; padding: 4px 0 !important; margin: 4px 0; align-self: center; }
-.vslider .rc-slider-vertical { height: 100% !important; }
-.vslider .rc-slider-rail {
-  background: var(--strip-inset); width: 8px; border-radius: 4px;
-  left: 50%; transform: translateX(-50%);
-  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.5), inset 0 1px 2px rgba(0,0,0,0.6);
+/* ── Vertical slider ─────────────────────────────────────── */
+.vslider { flex: 1; padding: 4px 0 !important; margin: 4px 0; }
+
+/* Dash 4.x / Radix: centre the root inside the full-width wrapper.
+   Target by element class name, not by className prop, to avoid uncertainty
+   about where Dash attaches the className="vslider" prop.               */
+#app-root .dash-slider-wrapper {
+  display: flex !important;
+  justify-content: center !important;
+  align-items: flex-start !important;
 }
-.vslider .rc-slider-track {
-  background: var(--accent); width: 10px;
-  left: 50%; transform: translateX(-50%);
-  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 35%, transparent); border-radius: 1px;
+#app-root .dash-slider-root[data-orientation="vertical"] {
+  width: fit-content !important;
+  flex-shrink: 0;
 }
-.vslider .rc-slider-handle {
-  width: 36px; height: 22px; margin-left: -14px; border-radius: 3px;
-  background: linear-gradient(180deg, var(--thumb-grad-top) 0%, var(--thumb-grad-bot) 100%);
-  border: 1px solid var(--thumb-border);
-  box-shadow: 0 2px 5px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.2);
-  opacity: 1;
+
+/* rc-slider (Dash 2.x) */
+#app-root .vslider .rc-slider-vertical { height: 100% !important; }
+#app-root .vslider .rc-slider-rail {
+  background: var(--strip-inset) !important; width: 8px !important;
+  border-radius: 4px !important; left: 50% !important; transform: translateX(-50%) !important;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,.5), inset 0 1px 2px rgba(0,0,0,.6) !important;
 }
-.vslider .rc-slider-handle::after {
-  content: ""; position: absolute; top: 50%; left: 4px; right: 4px; height: 2px;
-  background: var(--accent); transform: translateY(-50%);
-  box-shadow: 0 0 5px var(--accent); border-radius: 1px;
+#app-root .vslider .rc-slider-track {
+  background: var(--accent) !important; width: 10px !important;
+  left: 50% !important; transform: translateX(-50%) !important;
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 35%, transparent) !important;
+  border-radius: 1px !important;
 }
-.vslider .rc-slider-mark { left: 32px !important; top: 0; }
-.vslider .rc-slider-mark-text {
-  color: var(--faint); font-family: ui-monospace, Menlo, monospace; font-size: 9px; white-space: nowrap;
+#app-root .vslider .rc-slider-handle {
+  width: 36px !important; height: 22px !important; margin-left: -14px !important;
+  border-radius: 3px !important;
+  background: linear-gradient(180deg, var(--thumb-grad-top) 0%, var(--thumb-grad-bot) 100%) !important;
+  border: 1px solid var(--thumb-border) !important;
+  box-shadow: 0 2px 5px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.2) !important;
+  opacity: 1 !important;
 }
-.vslider .rc-slider-dot { display: none; }
+#app-root .vslider .rc-slider-handle::after {
+  content: "" !important; position: absolute !important;
+  top: 50% !important; left: 4px !important; right: 4px !important; height: 2px !important;
+  background: var(--accent) !important; transform: translateY(-50%) !important;
+  box-shadow: 0 0 5px var(--accent) !important; border-radius: 1px !important;
+}
+#app-root .vslider .rc-slider-mark { left: 32px !important; top: 0; }
+#app-root .vslider .rc-slider-mark-text {
+  color: var(--faint) !important; font-family: ui-monospace, Menlo, monospace !important;
+  font-size: 9px !important; white-space: nowrap !important;
+}
+#app-root .vslider .rc-slider-dot { display: none !important; }
+
+/* Radix slider (Dash 4.x) — only override appearance, let Radix handle layout */
+#app-root .vslider .dash-slider-track {
+  background: var(--strip-inset) !important;
+  width: 8px !important; border-radius: 4px !important;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,.5), inset 0 1px 2px rgba(0,0,0,.6) !important;
+}
+#app-root .vslider .dash-slider-range {
+  background: var(--accent) !important; border-radius: 1px !important;
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 35%, transparent) !important;
+}
+#app-root .vslider .dash-slider-thumb {
+  width: 36px !important; height: 22px !important;
+  border-radius: 3px !important; display: block !important;
+  outline: none !important; cursor: pointer !important;
+  /* accent line drawn as a background layer — avoids needing position:relative */
+  background:
+    linear-gradient(var(--accent, #4f8ef7), var(--accent, #4f8ef7))
+      center / calc(100% - 8px) 2px no-repeat,
+    linear-gradient(180deg, var(--thumb-grad-top, #4a5060) 0%, var(--thumb-grad-bot, #2a303c) 100%) !important;
+  border: 1px solid var(--thumb-border, #0a0d12) !important;
+  box-shadow: 0 2px 5px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.2) !important;
+}
+#app-root .vslider .dash-slider-mark {
+  color: var(--faint) !important; font-family: ui-monospace, Menlo, monospace !important;
+  font-size: 9px !important; white-space: nowrap !important;
+  left: calc(100% + 24px) !important;
+}
 
 /* Limit warning */
 .limit-warn {
