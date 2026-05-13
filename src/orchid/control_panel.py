@@ -124,6 +124,8 @@ class ControlPanel:
         open_browser: bool = True,
         readback: bool = True,
         readback_interval: int = 2000,
+        steps: dict[str, float] | None = None,
+        precision: int | dict[str, int] | None = None,
     ) -> None:
         self.bench = bench
         self.port = port
@@ -131,6 +133,8 @@ class ControlPanel:
         self.open_browser = open_browser
         self.readback = readback
         self.readback_interval = readback_interval
+        self._steps: dict[str, float] = steps or {}
+        self._precision: int | dict[str, int] = precision if precision is not None else 4
 
         self._queue = _SetterQueue()
         self._setter_thread: threading.Thread | None = None
@@ -220,6 +224,17 @@ class ControlPanel:
         app.title = "Orchid Control Panel"
         app.logger.setLevel(logging.ERROR)
 
+        # Remove native spinner arrows from number inputs (all browsers)
+        app.index_string = app.index_string.replace(
+            "</head>",
+            "<style>"
+            "input[type=number]::-webkit-inner-spin-button,"
+            "input[type=number]::-webkit-outer-spin-button{"
+            "-webkit-appearance:none;margin:0}"
+            "input[type=number]{-moz-appearance:textfield}"
+            "</style></head>",
+        )
+
         # ── Design tokens ──────────────────────────────────────────────
         FONT_UI    = "'Inter', system-ui, -apple-system, sans-serif"
         FONT_MONO  = "'JetBrains Mono', 'Fira Mono', monospace"
@@ -233,6 +248,8 @@ class ControlPanel:
         C_ACCENT   = "#4f8ef7"
         C_PENDING  = "#f59e0b"
         C_IDLE     = "#9ca3af"
+        C_LED      = "#4ade80" # "#FF5E5E"   # LED display digit colour
+        C_LED_BG   = "#0f172a"  # "#fdfdfd" # LED display background
 
         panel = self
         bench = self.bench
@@ -255,68 +272,112 @@ class ControlPanel:
             unit = ctrl.unit or ""
             has_limits = ctrl.limits is not None
 
-            children: list = [
-                html.Span(
-                    name,
-                    style={
-                        "width": "100px",
-                        "flexShrink": "0",
-                        "fontFamily": FONT_MONO,
-                        "fontWeight": "500",
-                        "fontSize": "13px",
-                        "color": C_LABEL,
-                        "letterSpacing": "0.01em",
-                    },
-                ),
-            ]
+            name_pill = html.Span(
+                name,
+                style={
+                    "fontFamily": FONT_UI,
+                    "fontWeight": "500",
+                    "fontSize": "16px",
+                    "color": C_LABEL,
+                    "background": "#f1f5f9",
+                    "border": "1px solid #e2e8f0",
+                    "borderRadius": "6px",
+                    "padding": "2px 8px",
+                    "whiteSpace": "nowrap",
+                },
+            )
+            unit_pill = html.Span(
+                unit,
+                style={
+                    "fontFamily": FONT_UI,
+                    "fontWeight": "400",
+                    "fontSize": "11px",
+                    "color": "#94a3b8",
+                    "background": "#f8fafc",
+                    "border": "1px solid #e2e8f0",
+                    "borderRadius": "6px",
+                    "padding": "2px 6px",
+                    "whiteSpace": "nowrap",
+                },
+            ) if unit else None
+
+            label_div = html.Div(
+                [name_pill, unit_pill] if unit_pill else [name_pill],
+                style={
+                    "flex": "1 1 50px",
+                    "minWidth": "40px",
+                    "display": "flex",
+                    "alignItems": "center",
+                    "gap": "6px",
+                    "overflow": "hidden",
+                },
+            )
+
+            children: list = [label_div]
 
             if has_limits:
                 lo, hi = ctrl.limits
+                step = panel._steps.get(name, (hi - lo) / 100)
+                slider_val = max(lo, min(hi, val))   # clamp: bench value may exceed limits
+                slider_kwargs: dict = dict(
+                    id=f"slider-{name}",
+                    min=lo,
+                    max=hi,
+                    value=slider_val,
+                    step=step,
+                    marks={
+                        lo: f"{lo:g}",
+                        **{lo + i * (hi - lo) / 4: "" for i in range(1, 4)},
+                        hi: f"{hi:g}",
+                    },
+                    updatemode="mouseup",
+                    tooltip={"always_visible": False, "placement": "bottom"},
+                )
                 children.append(
                     html.Div(
-                        dcc.Slider(
-                            id=f"slider-{name}",
-                            min=lo,
-                            max=hi,
-                            value=val,
-                            updatemode="mouseup",
-                            tooltip={"always_visible": False, "placement": "bottom"},
-                        ),
+                        dcc.Slider(**slider_kwargs),
                         style={
-                            "flex": "1",
+                            "width": "300px",    # fixed — does not scale with browser
+                            "flexShrink": "0",
                             "margin": "0 18px",
                             "alignSelf": "center",
-                            "minWidth": "0",
                         },
                     )
                 )
 
-            numeric_kwargs: dict = {
+            prec = (
+                panel._precision.get(name, 4)
+                if isinstance(panel._precision, dict)
+                else panel._precision
+            )
+            precision_kwargs: dict = {
                 "id": f"input-{name}",
                 "value": val,
-                "size": 110,
-                "label": unit,
-                "labelPosition": "right",
+                "precision": prec,
+                "size": 150,
                 "style": {"flexShrink": "0"},
             }
             if has_limits:
-                numeric_kwargs["min"] = ctrl.limits[0]
-                numeric_kwargs["max"] = ctrl.limits[1]
+                precision_kwargs["min"] = ctrl.limits[0]
+                precision_kwargs["max"] = ctrl.limits[1]
 
-            children.append(daq.NumericInput(**numeric_kwargs))
+            children.append(daq.PrecisionInput(**precision_kwargs))
 
             if panel.readback:
                 children.append(
-                    html.Span(
-                        id=f"readback-{name}",
-                        children=f"← {val:.5g}",
+                    html.Div(
+                        daq.LEDDisplay(
+                            id=f"readback-{name}",
+                            value=f"{val:.5g}",
+                            size=24,
+                            color=C_LED,
+                            backgroundColor=C_LED_BG,
+                        ),
                         style={
-                            "fontFamily": FONT_MONO,
-                            "fontSize": "12px",
-                            "color": C_READBACK,
                             "marginLeft": "14px",
-                            "minWidth": "110px",
+                            "width": "150px",      # fixed — prevents row shift on digit count change
                             "flexShrink": "0",
+                            "overflow": "hidden",
                         },
                     )
                 )
@@ -467,16 +528,16 @@ class ControlPanel:
         # Readback — parallel instrument reads via thread pool
         if panel.readback:
             @app.callback(
-                [Output(f"readback-{n}", "children") for n in ctrl_names],
+                [Output(f"readback-{n}", "value") for n in ctrl_names],
                 Input("readback-interval", "n_intervals"),
             )
             def _update_readbacks(n):
                 def _read(name: str) -> str:
                     try:
                         val = bench.controllers[name].get()
-                        return f"← {val:.5g}"
+                        return f"{val:.5g}"
                     except Exception:
-                        return "← ERR"
+                        return "Err"
 
                 with concurrent.futures.ThreadPoolExecutor() as pool:
                     return list(pool.map(_read, ctrl_names))
