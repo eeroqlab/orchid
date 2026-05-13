@@ -1676,7 +1676,7 @@ Move the class to an importable `.py` module, update the `class` field, and `Ben
 
 ### Interactive Control Panel
 
-`ControlPanel` opens a Dash/DAQ browser window with one row per controller — sliders for bounded controllers, numeric inputs for all. Writes are queued through a dedicated setter thread so the UI never blocks on slow instrument I/O.
+`ControlPanel` opens a Dash browser window with one vertical strip per controller, grouped by instrument. Writes are queued through a dedicated setter thread so the UI never blocks on slow instrument I/O.
 
 ```python
 from orchid import ControlPanel
@@ -1686,31 +1686,81 @@ panel.start()
 # Browser opens at http://localhost:8051
 ```
 
-#### All controllers
+#### Layout
+
+Each controller gets a vertical strip containing (top to bottom):
+
+- **Header** — colour-coded dot, controller name, unit
+- **LCD display** — 7-segment readback (DSEG7 font), shown when `readback=True`
+- **SP row** — current setpoint with `+`/`−` sign prefix
+- **Vertical slider** — for controllers with `limits`; sets on mouse release only
+- **Limit warning** — `⚠ NEAR LIMIT` / `⚠ OUT OF LIMIT` when close to or beyond bounds
+- **Numeric input** — free-type value, respects `min`/`max` when limits are set
+- **Step chips** — click to change the active step size (auto-computed from range)
+- **Nudge buttons** — `−` / `+` bump the value by the active step
+
+Strips are grouped by instrument. A separator line divides groups in the rack.
+
+#### Instrument tabs
+
+Tabs appear automatically in the header — one per instrument, plus an `ALL` tab:
+
+```
+[ALL] [lockin] [vna] [smu]
+```
+
+Clicking a tab shows only the strips for that instrument. `ALL` shows everything. Tab switching is clientside (instant, no server round-trip).
+
+#### Selecting controllers
 
 ```python
-# Show all controllers registered in bench
+# Show all controllers registered in bench (default)
 panel = ControlPanel(bench)
 
 # Show a specific subset
 panel = ControlPanel(bench, controllers=["Vgt", "Vbg", "fac"])
 ```
 
-#### Programmatic set
+#### Step sizes
 
-`panel.set()` is safe to call from any thread — from notebook cells, scripts, or other callbacks:
+Step chips are auto-computed from each controller's range (`(hi - lo) / 100`, `/ 10`, `/ 1`, `× 10`). Override per controller:
 
 ```python
-panel.set("Vgt", 0.5)
+panel = ControlPanel(bench, steps={"Vgt": 0.01, "freq": 1e6})
 ```
 
 #### Readback
 
-By default the panel polls each controller's current value every 2 s and displays it next to the input. Disable if reads are slow:
+By default the panel polls each controller's current value every 2 s and shows it on the LCD. Disable if reads are slow:
 
 ```python
 panel = ControlPanel(bench, readback=False)
 panel = ControlPanel(bench, readback=True, readback_interval=5000)  # 5 s
+```
+
+#### Appearance
+
+The **APPEARANCE** button in the header opens a dropdown with:
+
+- **Theme** — Dark / Light
+- **LCD accent** — 6 colour swatches (Blue, Red, Amber, Green, Cyan, Magenta); drives the LCD digits, slider track, active tab highlight, and step chip borders via a single `--accent` CSS variable
+
+Theme and accent choice persist across browser refreshes via `localStorage`.
+
+#### Status LEDs
+
+| LED | Meaning |
+|-----|---------|
+| **PWR** | Solid green — panel server is running |
+| **RUN** | Pulsing green — idle; pulsing amber — setter queue has pending writes |
+| **FAULT** | Off — no errors; pulsing red — last instrument write threw an exception (clears on next successful write) |
+
+#### Programmatic set
+
+`panel.set()` is safe to call from any thread:
+
+```python
+panel.set("Vgt", 0.5)
 ```
 
 #### Stopping
@@ -2372,52 +2422,59 @@ pip install "taipy-gui>=3.1"
 from orchid import ControlPanel
 ```
 
-Standalone Dash/DAQ browser UI for interactively adjusting bench controllers. Opens one row per controller: a slider (for controllers with `limits`) plus a numeric input. All instrument writes are routed through a dedicated setter thread with last-value-wins semantics, so the UI never blocks on slow instrument I/O.
+Standalone Dash browser UI for interactively adjusting bench controllers. Displays one vertical strip per controller, grouped by instrument with tab switching. All instrument writes are routed through a dedicated setter thread with last-value-wins semantics, so the UI never blocks on slow instrument I/O.
 
 ```python
 panel = ControlPanel(bench, port=8051)
-panel.start()   # opens http://localhost:8051
-panel.set("Vgt", 0.5)   # programmatic write from any thread
+panel.start()           # opens http://localhost:8051
+panel.set("Vgt", 0.5)  # programmatic write from any thread
 panel.stop()
 ```
 
 #### Constructor parameters
 
-| Argument            | Type            | Default | Description                                                     |
-|---------------------|-----------------|---------|-----------------------------------------------------------------|
-| `bench`             | `Bench`         | required| The lab bench whose controllers this panel controls             |
-| `port`              | `int`           | `8051`  | TCP port for the Dash server                                    |
-| `controllers`       | `list[str]` or `None` | `None` | Names to show; `None` shows all controllers in `bench`    |
-| `open_browser`      | `bool`          | `True`  | Open a browser tab automatically on `start()`                  |
-| `readback`          | `bool`          | `True`  | Poll and display each controller's current value periodically   |
-| `readback_interval` | `int`           | `2000`  | Readback poll period in milliseconds. Reads run in parallel via a thread pool. |
+| Argument            | Type                        | Default | Description                                                                      |
+|---------------------|-----------------------------|---------|----------------------------------------------------------------------------------|
+| `bench`             | `Bench`                     | required | The lab bench whose controllers this panel controls                             |
+| `port`              | `int`                       | `8051`  | TCP port for the Dash server                                                     |
+| `controllers`       | `list[str]` or `None`       | `None`  | Names to show; `None` shows all controllers in `bench`                           |
+| `open_browser`      | `bool`                      | `True`  | Open a browser tab automatically on `start()`                                   |
+| `readback`          | `bool`                      | `True`  | Poll each controller's current value periodically and display on the LCD        |
+| `readback_interval` | `int`                       | `2000`  | Readback poll period in milliseconds. Reads run in parallel via a thread pool.  |
+| `steps`             | `dict[str, float]` or `None`| `None`  | Override the default active step size per controller (used by slider and nudge buttons) |
 
 #### Methods and properties
 
-| Method / Property | Description                                                                 |
-|-------------------|-----------------------------------------------------------------------------|
-| `start()`         | Start the setter thread and Dash server                                     |
-| `stop()`          | Drain the setter queue and shut down the server                             |
-| `set(name, value)`| Queue a controller write. Safe to call from any thread.                     |
-| `is_running`      | `True` while the Dash server thread is alive                                |
+| Method / Property   | Description                                               |
+|---------------------|-----------------------------------------------------------|
+| `start()`           | Start the setter thread and Dash server                   |
+| `stop()`            | Drain the setter queue and shut down the server           |
+| `set(name, value)`  | Queue a controller write. Safe to call from any thread.   |
+| `is_running`        | `True` while the Dash server thread is alive              |
 
 #### UI behaviour
 
-- **Bounded controllers** (`limits` set): slider + numeric input. The slider fires only on mouse release (`updatemode="mouseup"`), preventing a flood of writes while dragging.
-- **Unbounded controllers**: numeric input only.
-- **Readback column**: shows the last value read back from the instrument (greyed monospace text).
-- **Status bar**: displays the last set (`name = value · N s ago`) and pending queue depth as pill badges.
-- **Last-value-wins**: if the same controller is changed multiple times before the setter thread drains, only the final value is applied.
+- **Instrument tabs** — auto-generated from `ctrl.instrument.name`; controllers with no instrument appear under `"Custom"`. Clientside switching (instant).
+- **Bounded controllers** (`limits` set) — vertical slider (sets on mouse release) + step chips + nudge `−`/`+` buttons + numeric input.
+- **Unbounded controllers** — numeric input only.
+- **Step chips** — 4 options auto-computed from the range; click to change the active step for slider snapping and nudge size. Override with `steps=`.
+- **LCD readback** — 7-segment DSEG7 font; polled every `readback_interval` ms via a thread pool.
+- **Limit warnings** — `⚠ NEAR LIMIT` (within 5 % of a bound) and `⚠ OUT OF LIMIT` displayed below the slider.
+- **Last-value-wins** — if the same controller is changed multiple times before the setter thread drains, only the final value is applied.
+- **Status LEDs** — PWR (always green), RUN (amber while queue has pending writes), FAULT (red on setter exception, clears on next success).
+- **Appearance menu** — dark/light theme toggle + 6 accent colour swatches; persists via `localStorage`.
 
 #### Event log integration
 
 `ControlPanel` writes via `bench[name] = val`, which fires the bench event log. If a `LivePlotter` with `x="_time"` is running, every manual panel adjustment automatically appears as an annotated vertical line on the plot.
 
-#### Requires `dash-daq`
+#### Dependencies
 
 ```bash
-pip install dash-daq
+pip install dash
 ```
+
+No `dash-daq` required.
 
 ---
 
