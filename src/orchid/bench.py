@@ -265,7 +265,6 @@ class Bench:
             contains=contains,
         )
         self.readouts[name] = readout
-        return readout
 
     def remove_instrument(self, name: str) -> None:
         """Remove an instrument and all parameters/readouts that depend on it.
@@ -402,7 +401,7 @@ class Bench:
                     val = p.get()
                 except Exception as e:
                     val = f"ERR: {e}"
-                rows.append([name, "param", val, p.unit or ""])
+                rows.append([name, "ctrl", val, p.unit or ""])
             elif name in self.readouts:
                 r = self.readouts[name]
                 try:
@@ -414,7 +413,7 @@ class Bench:
                     val = "[...]"
                 elif r.kind.value == "image" and not isinstance(val, str):
                     val = "[[...]]"
-                rows.append([name, r.kind.value, val, r.unit or ""])
+                rows.append([name, f"read / {r.kind.value}", val, r.unit or ""])
             else:
                 rows.append([name, "?", "NOT FOUND", ""])
 
