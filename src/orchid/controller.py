@@ -146,7 +146,7 @@ class Controller:
             return self.get_func()
         elif self.instrument is not None:
             return self.instrument.get(self.attr)
-        return None
+        raise RuntimeError(f"Controller {self.name!r} is set-only (no getter)")
 
     def set(self, value: Any) -> None:
         """Clamp value to limits (if set) and apply."""

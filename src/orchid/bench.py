@@ -206,9 +206,6 @@ class Bench:
             for ctrl in physical:
                 ctrl.set(value)
 
-        def get_bound():
-            return {ctrl.name: ctrl.get() for ctrl in physical}
-
         self.add_controller(
             name,
             get_func=None,
