@@ -9,9 +9,9 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from .controller import Controller
 if TYPE_CHECKING:
     from .bench import Bench
+    from .controller import Controller
 
 _ASSETS_DIR = pathlib.Path(__file__).parent / "assets"
 
@@ -88,10 +88,12 @@ def _nice_marks(lo: float, hi: float) -> dict:
 
 
 def _is_readable(ctrl: Controller) -> bool:
-    """Return False if the controller doesn't have get functionality / Virtual Controller."""
-    if (ctrl.instrument is None) and (ctrl.get_func is None):
-        return False
-    return True
+    """Return True if the controller can read back its current value.
+
+    A controller is *set-only* when it has no instrument binding **and** no
+    explicit ``get_func`` — i.e. a virtual binding that only writes.
+    """
+    return not (ctrl.instrument is None and ctrl.get_func is None)
 
 
 def _fmt_sp(v: float, unit: str = "", prec: int = 4) -> str:
