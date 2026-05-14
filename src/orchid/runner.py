@@ -873,8 +873,8 @@ class ExperimentRunner:
 
                 sample_idx += 1
 
-                if sample_idx % 100 == 0:
-                    print(f"  Monitor: {sample_idx} samples collected")
+                # if sample_idx % 100 == 0:
+                #     print(f"  Monitor: {sample_idx} samples collected")
 
                 await asyncio.sleep(proc.interval)
 

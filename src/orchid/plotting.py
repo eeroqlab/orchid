@@ -189,7 +189,7 @@ class PlotterBase(abc.ABC):
         plots: list[PlotSpec],
         height: int = 350,
         width: int = 700,
-        open_browser: bool = True,
+        open_browser: bool = False,
         event_line: EventLineConfig | None = None,
         max_display_pts: int = 5000,
     ):
@@ -849,7 +849,7 @@ class DashPlotter(PlotterBase):
         port: int = 8050,
         height: int = 350,
         width: int = 700,
-        open_browser: bool = True,
+        open_browser: bool = False,
         update_interval: int = 500,
         event_line: EventLineConfig | None = None,
         max_display_pts: int = 5000,
