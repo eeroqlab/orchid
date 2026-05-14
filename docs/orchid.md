@@ -1262,7 +1262,7 @@ len(bench.controllers["Vgt"].limit_log)  # how many points were clamped
 
 ### Controller Bindings
 
-Use `Bench.add_controller_binding()` when one logical control should fan out to several existing physical controllers. Setting the binding applies the same value to every bound controller. Reading the binding returns a dictionary of current bound-controller values.
+Use `Bench.add_controller_binding()` when one logical control should fan out to several existing physical controllers. Setting the binding applies the same value to every bound controller. Bindings are **set-only** — calling `bench["binding"]` (get) raises `RuntimeError`; read the individual bound controllers directly instead.
 
 ```python
 bench.add_controller("stp", instrument="yoko1", attr="voltage", unit="V")
@@ -1270,9 +1270,8 @@ bench.add_controller("stm", instrument="yoko2", attr="voltage", unit="V")
 
 bench.add_controller_binding("reservoir_v", ["stp", "stm"])
 
-bench["reservoir_v"] = -0.25
-print(bench["reservoir_v"])
-# {"stp": -0.25, "stm": -0.25}
+bench["reservoir_v"] = -0.25          # fans out to stp and stm
+print(bench["stp"])                   # read individual controllers directly
 ```
 
 Bindings are regular `Controller` objects, so they can be used in `Sweep` or `MultiSweep`. Bound physical controllers still enforce their own limits when they receive the value.
@@ -1738,6 +1737,10 @@ panel = ControlPanel(bench, readback=False)
 panel = ControlPanel(bench, readback=True, readback_interval=5000)  # 5 s
 ```
 
+#### Set-only controllers
+
+Controllers without a getter (e.g. those created by `add_controller_binding`) are detected automatically. Their LCD mirrors the last value you set rather than polling the instrument, and the SP row is replaced by a **NO RDBACK** badge. No configuration required.
+
 #### Appearance
 
 The **APPEARANCE** button in the header opens a dropdown with:
@@ -1951,7 +1954,7 @@ Register a control parameter. `instrument` can be an `InstrumentAdapter` object 
 
 **`add_controller_binding(name, gate_names, *, unit=None) -> Controller`**
 
-Register a virtual controller that sets all controllers named in `gate_names` to the same value and reads them back as `{controller_name: value}`. If `unit` is omitted, it is inferred from bound controllers.
+Register a **set-only** virtual controller that fans out to all controllers named in `gate_names`. Setting the binding applies the same value to every bound controller. Getting it raises `RuntimeError` — read individual bound controllers directly. If `unit` is omitted, it is inferred from bound controllers.
 
 **`add_readout(name, kind, get_func=None, instrument=None, attr=None, shape=None, unit=None, contains=None) -> Readout`**
 
@@ -2438,7 +2441,7 @@ panel.stop()
 | `bench`             | `Bench`                     | required | The lab bench whose controllers this panel controls                             |
 | `port`              | `int`                       | `8051`  | TCP port for the Dash server                                                     |
 | `controllers`       | `list[str]` or `None`       | `None`  | Names to show; `None` shows all controllers in `bench`                           |
-| `open_browser`      | `bool`                      | `True`  | Open a browser tab automatically on `start()`                                   |
+| `open_browser`      | `bool`                      | `False` | Open a browser tab automatically on `start()`                                   |
 | `readback`          | `bool`                      | `True`  | Poll each controller's current value periodically and display on the LCD        |
 | `readback_interval` | `int`                       | `2000`  | Readback poll period in milliseconds. Reads run in parallel via a thread pool.  |
 | `steps`             | `dict[str, float]` or `None`| `None`  | Override the default active step size per controller (used by slider and nudge buttons) |
