@@ -144,7 +144,9 @@ class Controller:
         """Read current value."""
         if self.get_func is not None:
             return self.get_func()
-        return self.instrument.get(self.attr)
+        elif self.instrument is not None:
+            return self.instrument.get(self.attr)
+        return None
 
     def set(self, value: Any) -> None:
         """Clamp value to limits (if set) and apply."""

@@ -9,6 +9,7 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+from .controller import Controller
 if TYPE_CHECKING:
     from .bench import Bench
 
@@ -84,6 +85,13 @@ def _nice_marks(lo: float, hi: float) -> dict:
         return f"+{s}" if val > 0 else s
 
     return {v: {"label": _fmt(v)} for v in ticks}
+
+
+def _is_readable(ctrl: Controller) -> bool:
+    """Return False if the controller doesn't have get functionality / Virtual Controller."""
+    if (ctrl.instrument is None) and (ctrl.get_func is None):
+        return False
+    return True
 
 
 def _fmt_sp(v: float, unit: str = "", prec: int = 4) -> str:
@@ -190,7 +198,7 @@ class ControlPanel:
         bench: Bench,
         port: int = 8051,
         controllers: list[str] | None = None,
-        open_browser: bool = True,
+        open_browser: bool = False,
         readback: bool = True,
         readback_interval: int = 2000,
         steps: dict[str, float] | None = None,
@@ -316,6 +324,10 @@ class ControlPanel:
             val = initial[name]
             unit = ctrl.unit or ""
             has_limits = ctrl.limits is not None
+            readable = _is_readable(ctrl)
+            # show LCD if readback is on (readable) OR controller is set-only
+            show_lcd = panel.readback or not readable
+            lcd_role = "lcd" if readable else "lcd-sp"
 
             if has_limits:
                 lo, hi = ctrl.limits
@@ -340,24 +352,33 @@ class ControlPanel:
                     html.Span(unit, className="strip-unit"),
                 ]),
 
-                # ── LCD readback ──────────────────────────────────────
+                # ── LCD: readback (readable) or setpoint mirror (set-only) ──
                 *([ html.Div(className="lcd-frame", children=[
                     html.Span(
-                        id={"role": "lcd", "ch": name},
+                        id={"role": lcd_role, "ch": name},
                         className="lcd-value",
                         children=f"{val:.4g}",
                     ),
                     html.Span(unit, className="lcd-unit"),
-                ])] if panel.readback else []),
+                ])] if show_lcd else []),
 
-                # ── Setpoint row ──────────────────────────────────────
+                # ── Setpoint row (readable) / no-readback badge (set-only) ──
                 html.Div(className="sp-row", children=[
-                    html.Span("SP", className="sp-tag"),
-                    html.Span(
-                        id={"role": "sp-text", "ch": name},
-                        className="sp-text",
-                        children=_fmt_sp(val, unit),
-                    ),
+                    *([
+                        html.Span("SP", className="sp-tag"),
+                        html.Span(
+                            id={"role": "sp-text", "ch": name},
+                            className="sp-text",
+                            children=_fmt_sp(val, unit),
+                        ),
+                    ] if readable else [
+                        html.Span("NO RDBACK", className="no-rdback-badge"),
+                        # hidden sink keeps the callback output valid
+                        html.Span(
+                            id={"role": "sp-text", "ch": name},
+                            style={"display": "none"},
+                        ),
+                    ]),
                 ]),
             ]
 
@@ -508,10 +529,12 @@ class ControlPanel:
             for t in tabs
         ]
 
+        has_readable = any(_is_readable(bench.controllers[n]) for n in ctrl_names)
+
         intervals: list = [
             dcc.Interval(id="status-interval", interval=500, n_intervals=0),
         ]
-        if panel.readback:
+        if panel.readback and has_readable:
             intervals.append(
                 dcc.Interval(
                     id="readback-interval",
@@ -723,6 +746,8 @@ class ControlPanel:
         for name in ctrl_names:
             ctrl = bench.controllers[name]
             has_limits = ctrl.limits is not None
+            readable = _is_readable(ctrl)
+            show_lcd = panel.readback or not readable
 
             if has_limits:
                 lo, hi = ctrl.limits
@@ -731,19 +756,27 @@ class ControlPanel:
                 unit = ctrl.unit or ""
 
                 # Slider ↔ input sync + queue set + limit warning
+                # For set-only controllers also update the lcd-sp element
+                _sync_outputs = [
+                    Output({"role": "input",   "ch": name}, "value"),
+                    Output({"role": "slider",  "ch": name}, "value"),
+                    Output({"role": "sp-text", "ch": name}, "children"),
+                    Output({"role": "limit",   "ch": name}, "children"),
+                    Output({"role": "limit",   "ch": name}, "className"),
+                ]
+                if show_lcd and not readable:
+                    _sync_outputs.append(Output({"role": "lcd-sp", "ch": name}, "children"))
+
                 @app.callback(
-                    Output({"role": "input",    "ch": name}, "value"),
-                    Output({"role": "slider",   "ch": name}, "value"),
-                    Output({"role": "sp-text",  "ch": name}, "children"),
-                    Output({"role": "limit",    "ch": name}, "children"),
-                    Output({"role": "limit",    "ch": name}, "className"),
+                    *_sync_outputs,
                     Input({"role": "slider",    "ch": name}, "value"),
                     Input({"role": "input",     "ch": name}, "value"),
                     prevent_initial_call=True,
                 )
                 def _sync(slider_val, input_val,
                           _name=name, _lo=lo, _hi=hi,
-                          _soft_lo=soft_lo, _soft_hi=soft_hi, _unit=unit):
+                          _soft_lo=soft_lo, _soft_hi=soft_hi, _unit=unit,
+                          _readable=readable, _show_lcd=show_lcd):
                     triggered = ctx.triggered_id
                     val = (
                         slider_val
@@ -760,8 +793,11 @@ class ControlPanel:
                     elif v < _soft_lo or v > _soft_hi:
                         lim_txt, lim_cls = "⚠ NEAR LIMIT",   "limit-warn limit-near"
                     else:
-                        lim_txt, lim_cls = "",                     "limit-warn"
-                    return val, val, sp, lim_txt, lim_cls
+                        lim_txt, lim_cls = "",                 "limit-warn"
+                    result = [val, val, sp, lim_txt, lim_cls]
+                    if _show_lcd and not _readable:
+                        result.append(f"{float(val):.4g}" if val is not None else "---")
+                    return result
 
                 # Step chip → update step store + highlight + slider step
                 @app.callback(
@@ -812,20 +848,30 @@ class ControlPanel:
                 # No limits: input only → queue set
                 unit = ctrl.unit or ""
 
+                _no_lim_outputs = [
+                    Output({"role": "sink",    "ch": name}, "children"),
+                    Output({"role": "sp-text", "ch": name}, "children"),
+                ]
+                if show_lcd and not readable:
+                    _no_lim_outputs.append(Output({"role": "lcd-sp", "ch": name}, "children"))
+
                 @app.callback(
-                    Output({"role": "sink",     "ch": name}, "children"),
-                    Output({"role": "sp-text",  "ch": name}, "children"),
-                    Input({"role": "input",     "ch": name}, "value"),
+                    *_no_lim_outputs,
+                    Input({"role": "input", "ch": name}, "value"),
                     prevent_initial_call=True,
                 )
-                def _set_no_limits(input_val, _name=name, _unit=unit):
+                def _set_no_limits(input_val, _name=name, _unit=unit,
+                                   _readable=readable, _show_lcd=show_lcd):
                     if input_val is not None:
                         panel.set(_name, float(input_val))
                     sp = _fmt_sp(float(input_val), _unit) if input_val is not None else "—"
-                    return no_update, sp
+                    result = [no_update, sp]
+                    if _show_lcd and not _readable:
+                        result.append(f"{float(input_val):.4g}" if input_val is not None else "---")
+                    return result
 
-        # Readback — parallel reads via thread pool
-        if panel.readback:
+        # Readback — parallel reads via thread pool (readable controllers only)
+        if panel.readback and has_readable:
             @app.callback(
                 Output({"role": "lcd", "ch": ALL}, "children"),
                 Input("readback-interval", "n_intervals"),

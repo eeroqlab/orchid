@@ -168,6 +168,8 @@ class Bench:
         gate_names: list[str],
         *,
         unit: str | None = None,
+        limits: tuple[float, float] | None = None,
+        limit_policy: LimitPolicy = LimitPolicy.WARN,
     ):
         """Register a virtual controller bound to existing controllers.
 
@@ -209,9 +211,11 @@ class Bench:
 
         self.add_controller(
             name,
-            get_func=get_bound,
+            get_func=None,
             set_func=set_bound,
             unit=unit,
+            limits=limits,
+            limit_policy=limit_policy
         )
 
     def add_readout(
