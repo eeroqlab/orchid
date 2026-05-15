@@ -402,7 +402,7 @@ class Bench:
                     val = p.get()
                 except Exception as e:
                     val = f"ERR: {e}"
-                rows.append([name, "ctrl", val, p.unit or ""])
+                rows.append([name, "ctrl", val, p.unit or "", p.limits or ""])
             elif name in self.readouts:
                 r = self.readouts[name]
                 try:
@@ -414,11 +414,11 @@ class Bench:
                     val = "[...]"
                 elif r.kind.value == "image" and not isinstance(val, str):
                     val = "[[...]]"
-                rows.append([name, f"read / {r.kind.value}", val, r.unit or ""])
+                rows.append([name, f"read / {r.kind.value}", val, r.unit or "", "N/A"])
             else:
                 rows.append([name, "?", "NOT FOUND", ""])
 
-        print(_tabulate(rows, headers=["Name", "Type", "Value", "Unit"],
+        print(_tabulate(rows, headers=["Name", "Type", "Value", "Unit", "Limits"],
                         tablefmt="simple"))
 
     # ── Persistence ───────────────────────────────────────────────────
