@@ -11,7 +11,7 @@ from typing import Any, Callable
 import numpy as np
 
 from .bench import Bench
-from .controller import Controller
+from .controller import ControllerBase, Controller
 
 
 def _describe_hook(fn) -> dict | None:
@@ -93,7 +93,7 @@ class Sweep:
 
     Parameters
     ----------
-    controller : Controller or str
+    controller : ControllerBase or str
         The controller to sweep (or its name in the context).
     values : array-like
         Sweep values.
@@ -101,7 +101,7 @@ class Sweep:
         If True, append reversed values for hysteresis sweep.
     """
 
-    controller: Controller | str
+    controller: ControllerBase | str
     values: np.ndarray
     reverse: bool = False
 
@@ -124,7 +124,7 @@ class MultiSweep:
 
     Parameters
     ----------
-    controllers : list of Controller or str
+    controllers : list of ControllerBase or str
         Controllers to sweep simultaneously. String names are resolved
         against the context in ``Procedure.__post_init__``.
     values : list of array-like

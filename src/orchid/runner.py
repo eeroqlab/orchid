@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from .controller import DataKind
+from .controller import DataKind, VirtualReadout
 from .procedure import ErrorPolicy, MonitorProcedure, MultiSweep, Procedure, WriteMode
 
 # Zarro imports — use absolute import from the sibling package
@@ -47,10 +47,23 @@ def _run_coro(coro):
     # Event loop already running (Jupyter, IPython, etc.).
     # Run the coroutine in a background thread so it gets its own loop and
     # context, fully isolated from the notebook kernel's event loop.
+    #
+    # Capture stdout/stderr from the calling (main) thread and forward them
+    # into the worker thread.  ipykernel 5+ routes output via thread-local
+    # context, so worker threads don't inherit the current cell's output
+    # automatically — without this, prints appear under the wrong cell.
+    import sys
     import concurrent.futures
 
+    _stdout, _stderr = sys.stdout, sys.stderr
+
+    def _run_with_output():
+        sys.stdout = _stdout
+        sys.stderr = _stderr
+        return asyncio.run(coro)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(asyncio.run, coro)
+        future = pool.submit(_run_with_output)
         try:
             return future.result()
         except KeyboardInterrupt:
@@ -197,8 +210,19 @@ class WriteStrategy(abc.ABC):
                 result[sweep.controller.name] = float(vals[i])
         return result
 
+    def _partition_readouts(self) -> tuple[list[str], list[str]]:
+        """Return (physical_names, virtual_names) with physicals ordered first."""
+        phys, virt = [], []
+        for rname in self.proc.readouts:
+            rd = self.proc.bench.readouts[rname]
+            if isinstance(rd, VirtualReadout):
+                virt.append(rname)
+            else:
+                phys.append(rname)
+        return phys, virt
+
     async def _safe_read(self, readout):
-        """Read a readout with error handling per the procedure's policy."""
+        """Read a physical readout with error handling per the procedure's policy."""
         proc = self.proc
         for attempt in range(proc.max_retries + 1):
             try:
@@ -216,6 +240,29 @@ class WriteStrategy(abc.ABC):
                     print(f"  Ignoring error for {readout.name}: {e}")
                     return self._nan_value(readout)
         return self._nan_value(readout)
+
+    async def _compute_virtual(self, vrd: VirtualReadout, data: dict):
+        """Compute a virtual readout; follows error_policy but no retries."""
+        proc = self.proc
+        try:
+            return await vrd.acompute(data)
+        except Exception as e:
+            if proc.error_policy == ErrorPolicy.STOP_AND_SAVE:
+                raise
+            verb = "Ignoring" if proc.error_policy == ErrorPolicy.IGNORE else "Skipping"
+            print(f"  {verb} virtual readout {vrd.name!r}: {e}")
+            return self._nan_value(vrd)
+
+    async def _read_all(self) -> dict:
+        """Read all physical readouts then compute all virtual readouts."""
+        phys_names, virt_names = self._partition_readouts()
+        data = {}
+        for rname in phys_names:
+            data[rname] = await self._safe_read(self.proc.bench.readouts[rname])
+        for rname in virt_names:
+            vrd = self.proc.bench.readouts[rname]
+            data[rname] = await self._compute_virtual(vrd, data)
+        return data
 
     def _nan_value(self, readout):
         """Return a NaN-filled value matching the readout shape."""
@@ -236,10 +283,9 @@ class WriteStrategy(abc.ABC):
         if self.proc.settle_time > 0:
             await asyncio.sleep(self.proc.settle_time)
 
+        data = await self._read_all()
         for rname in self.proc.readouts:
-            buffers[rname][index] = await self._safe_read(
-                self.proc.bench.readouts[rname]
-            )
+            buffers[rname][index] = data[rname]
 
         await _acall_hook(self.proc.after_point, index)
         if self.pbar:
@@ -297,11 +343,7 @@ class PointwiseStrategy(WriteStrategy):
             if self.proc.settle_time > 0:
                 await asyncio.sleep(self.proc.settle_time)
 
-            data = {}
-            for rname in self.proc.readouts:
-                data[rname] = await self._safe_read(
-                    self.proc.bench.readouts[rname]
-                )
+            data = await self._read_all()
 
             self.writer.write_point(index, data)
             self._notify_plotter_point(index, data)
@@ -348,11 +390,8 @@ class SweepwiseStrategy(WriteStrategy):
             if self.proc.settle_time > 0:
                 await asyncio.sleep(self.proc.settle_time)
 
-            point_data = {}
+            point_data = await self._read_all()
             for rname in self.proc.readouts:
-                point_data[rname] = await self._safe_read(
-                    self.proc.bench.readouts[rname]
-                )
                 buffers[rname][i] = point_data[rname]
 
             self._notify_plotter_point(full_index, point_data)
@@ -412,11 +451,8 @@ class PlanewiseStrategy(WriteStrategy):
                 if self.proc.settle_time > 0:
                     await asyncio.sleep(self.proc.settle_time)
 
-                point_data = {}
+                point_data = await self._read_all()
                 for rname in self.proc.readouts:
-                    point_data[rname] = await self._safe_read(
-                        self.proc.bench.readouts[rname]
-                    )
                     buffers[rname][i, j] = point_data[rname]
 
                 self._notify_plotter_point(full_index, point_data)
@@ -451,11 +487,8 @@ class AllStrategy(WriteStrategy):
             if self.proc.settle_time > 0:
                 await asyncio.sleep(self.proc.settle_time)
 
-            point_data = {}
+            point_data = await self._read_all()
             for rname in self.proc.readouts:
-                point_data[rname] = await self._safe_read(
-                    self.proc.bench.readouts[rname]
-                )
                 buffers[rname][index] = point_data[rname]
 
             self._notify_plotter_point(index, point_data)
@@ -612,6 +645,19 @@ class ExperimentRunner:
                 yaml.safe_dump(entries, sort_keys=False, allow_unicode=True)
             )
 
+    @staticmethod
+    def _validate_virtual_readouts(proc) -> None:
+        """Raise ValueError if any VirtualReadout has sources missing from proc.readouts."""
+        for rname in proc.readouts:
+            rd = proc.bench.readouts[rname]
+            if isinstance(rd, VirtualReadout):
+                missing = [s for s in rd.sources if s not in proc.readouts]
+                if missing:
+                    raise ValueError(
+                        f"VirtualReadout {rname!r}: sources {missing} must be listed "
+                        f"in proc.readouts so their data is recorded"
+                    )
+
     async def arun(self, proc: Procedure, plotter=None,
                    print_summary: bool = False) -> Path:
         """Run a sweep experiment asynchronously."""
@@ -623,6 +669,7 @@ class ExperimentRunner:
         if print_summary:
             proc.summary()
 
+        self._validate_virtual_readouts(proc)
         self._reset_limit_logs(proc)
 
         data_dir = self._get_data_dir(proc)
@@ -791,6 +838,7 @@ class ExperimentRunner:
         if print_summary:
             proc.summary()
 
+        self._validate_virtual_readouts(proc)
         self._reset_limit_logs(proc)
 
         data_dir = self._get_data_dir(proc)
@@ -847,16 +895,30 @@ class ExperimentRunner:
                     if elapsed >= proc.duration:
                         break
 
-                # Read all readouts — errors are caught per-readout so a single
-                # instrument hiccup doesn't abort a long-running monitor session.
+                # Read physical readouts first, then compute virtuals.
+                # Errors are caught per-readout so a single instrument hiccup
+                # doesn't abort a long-running monitor session.
                 data = {}
-                for rname in proc.readouts:
+                phys_names = [r for r in proc.readouts
+                              if not isinstance(proc.bench.readouts[r], VirtualReadout)]
+                virt_names = [r for r in proc.readouts
+                              if isinstance(proc.bench.readouts[r], VirtualReadout)]
+
+                for rname in phys_names:
                     readout = proc.bench.readouts[rname]
                     try:
                         data[rname] = await readout.aread()
                     except Exception as e:
                         print(f"  Warning: read error for '{rname}' at sample {sample_idx}: {e}")
                         data[rname] = _nan_for_readout(readout)
+
+                for rname in virt_names:
+                    vrd = proc.bench.readouts[rname]
+                    try:
+                        data[rname] = await vrd.acompute(data)
+                    except Exception as e:
+                        print(f"  Warning: compute error for virtual '{rname}' at sample {sample_idx}: {e}")
+                        data[rname] = _nan_for_readout(vrd)
 
                 timestamp = time.time()
                 writer.append(data, timestamp=timestamp)

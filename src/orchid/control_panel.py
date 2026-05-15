@@ -93,7 +93,10 @@ def _is_readable(ctrl: Controller) -> bool:
     A controller is *set-only* when it has no instrument binding **and** no
     explicit ``get_func`` — i.e. a virtual binding that only writes.
     """
-    return not (ctrl.instrument is None and ctrl.get_func is None)
+    if hasattr(ctrl, "instrument"):
+        return not (ctrl.instrument is None and ctrl.get_func is None)
+    else:
+        return False
 
 
 def _fmt_sp(v: float, unit: str = "", prec: int = 4) -> str:
@@ -300,7 +303,10 @@ class ControlPanel:
         groups: dict[str, list[str]] = {}      # {instr_name: [ctrl_name, ...]}
         for name in ctrl_names:
             ctrl = bench.controllers[name]
-            instr_name = ctrl.instrument.name if ctrl.instrument else "Custom"
+            if hasattr(ctrl, "instrument"):
+                instr_name = ctrl.instrument.name if ctrl.instrument else "Custom"
+            else:
+                instr_name = "Custom"
             groups.setdefault(instr_name, []).append(name)
 
         group_color: dict[str, str] = {

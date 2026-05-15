@@ -1,7 +1,10 @@
 """Orchid — Orchestrating Instruments & Data for lab experiments."""
 
 from .instrument import InstrumentAdapter
-from .controller import DataKind, Controller, LimitPolicy, LimitEntry, Readout
+from .controller import (
+    DataKind, Controller, ControllerBase, PhysicalController, VirtualController,
+    LimitPolicy, LimitEntry, Readout, PhysicalReadout, VirtualReadout,
+)
 from .bench import Bench
 from .procedure import ErrorPolicy, MonitorProcedure, MultiSweep, Procedure, Sweep, WriteMode
 from .runner import ExperimentRunner
@@ -13,9 +16,14 @@ __all__ = [
     "InstrumentAdapter",
     "DataKind",
     "Controller",
+    "ControllerBase",
+    "PhysicalController",
+    "VirtualController",
     "LimitPolicy",
     "LimitEntry",
     "Readout",
+    "PhysicalReadout",
+    "VirtualReadout",
     "Bench",
     "ErrorPolicy",
     "MonitorProcedure",
