@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import abc
+import copy
 import threading
 import time
+import warnings
 from dataclasses import dataclass
 from typing import Callable
 
@@ -71,66 +73,89 @@ class PlotSpec:
     z : str, optional
         Readout name for the color axis.
         Required for ``"heatmap"`` and ``"trace_heatmap"``. Ignored for line.
+    y_col : int, str, list[int | str], or None
+        Column selector for TRACE or IMAGE readouts on ``"line"`` and
+        ``"live_trace"`` plots.
+
+        - ``None``: not used (SCALAR readouts) or use whole array (TRACE
+          ``live_trace``).
+        - ``int``: zero-based channel index.
+        - ``str``: channel name, resolved via ``readout.contains``.
+        - ``list``: multiple channels → one trace per channel on the same
+          subplot.
+
+        For TRACE shape ``(N,)``: ``y_col`` indexes elements → scalar per
+        point.
+        For IMAGE shape ``(N_channels, N_pts)``: ``y_col`` indexes the first
+        (channel) axis → 1D array per point for ``live_trace``, scalar per
+        point for ``line``.
     z_col : int or str or None
-        Column selector for IMAGE or TRACE readouts used as ``z`` (or ``y``
-        for ``live_trace``).
-        - ``None`` (default): use the whole array (valid for TRACE readouts).
-        - ``int``: column index.
-        - ``str``: column name, resolved via ``readout.contains``.
-        Ignored for SCALAR readouts.
+        Column selector for IMAGE readouts on ``"heatmap"`` and
+        ``"trace_heatmap"`` plots (color axis). Same int/str semantics as
+        ``y_col``. Ignored for SCALAR and TRACE readouts.
     plot_type : str
         ``"line"``, ``"heatmap"``, ``"live_trace"``, ``"trace_heatmap"``,
         or ``"auto"`` (default).
-        ``"auto"`` infers the type from the types of ``x`` and ``y``:
 
-        ============  ============  ====================
-        ``x``         ``y``         resolved type
-        ============  ============  ====================
-        str           str, ndim=1   line
-        str           str, ndim≥2   heatmap
-        array         str           live_trace
-        str           array         trace_heatmap
-        ============  ============  ====================
+        ``"auto"`` resolves using DataKind and context:
 
-    update_every : str
-        ``"point"`` — update after every measurement point (use for
-        ``live_trace`` / ``trace_heatmap`` with a 1D sweep).
-        ``"sweep"`` — update after each inner sweep completes (default).
-        ``"plane"`` — update after each 2D plane completes.
+        ============================  ==========================
+        condition                     resolved type
+        ============================  ==========================
+        ``x`` is array                ``live_trace``
+        ``y`` is array                ``trace_heatmap``
+        ``z`` set, Procedure ≥2D      ``heatmap``
+        ``y_col`` set or SCALAR ``y`` ``line``
+        ============================  ==========================
+
+    update_every : str or None
+        ``"point"``, ``"sweep"``, or ``"plane"``.
+        ``None`` (default) — auto-determined from the resolved plot type:
+        ``live_trace`` / ``trace_heatmap`` → ``"point"``;
+        ``heatmap`` → ``"sweep"`` (3D → ``"plane"``);
+        ``line`` → ``"point"``.
     update_func : callable, optional
         Custom update function ``(fig_dict, index, data) -> None``.
         Overrides built-in update logic when set.
 
     Examples
     --------
-    Line plot (1D sweep)::
+    Line — 1D sweep, SCALAR readout::
 
         PlotSpec(x="Vgt", y="lockin_X")
 
-    Heatmap (2D sweep)::
+    Line — 1D sweep, lock-in returning [X, Y], both on same subplot::
+
+        PlotSpec(x="Vgt", y="lockin_XY", y_col=["X", "Y"])
+
+    Line — monitor, lock-in X vs time::
+
+        PlotSpec(x="_time", y="lockin_XY", y_col="X")
+
+    Heatmap — 2D sweep::
 
         PlotSpec(x="fac", y="Vgt", z="lockin_X")
 
-    Live trace — current VNA trace refreshing each power step::
+    Live trace — VNA magnitude waveform refreshing each gate step::
 
-        PlotSpec(x=freqs, y="S21", z_col="mag", update_every="point")
+        PlotSpec(x=freqs, y="vna", y_col="mag")
 
-    Trace heatmap — accumulate VNA traces vs power::
+    Trace heatmap — accumulate VNA magnitude vs gate voltage::
 
-        PlotSpec(x="vna_power", y=freqs, z="S21", z_col="mag",
-                 update_every="point")
+        PlotSpec(x="Vgt", y=freqs, z="vna", z_col="mag")
 
-    Trace heatmap from a plain TRACE readout (no z_col needed)::
+    Trace heatmap — plain TRACE readout (no z_col needed)::
 
-        PlotSpec(x="vna_power", y=freqs, z="mag", update_every="point")
+        PlotSpec(x="Vgt", y=freqs, z="mag")
     """
 
     x: str | np.ndarray | list
     y: str | list[str] | np.ndarray | list
     z: str | None = None
+    y_col: int | str | list[int | str] | None = None
     z_col: int | str | None = None
     plot_type: str = "auto"
-    update_every: str = "sweep"
+    update_every: str | None = None
     update_func: Callable | None = None
     colorscale: str | list | None = None  # heatmap / trace_heatmap only
 
@@ -150,8 +175,90 @@ def _y_list(spec: PlotSpec) -> list[str]:
 
 
 def _is_array(v) -> bool:
-    """True when v is an array-like axis specification (not a string)."""
-    return isinstance(v, (np.ndarray, list)) and not isinstance(v, str)
+    """True when v is a numeric array-like axis specification.
+
+    A list of strings is a list of readout names, not axis values, so it
+    returns False.  Only numpy arrays and lists of numbers return True.
+    """
+    if isinstance(v, np.ndarray):
+        return True
+    if isinstance(v, list) and v and not isinstance(v[0], str):
+        return True
+    return False
+
+
+def _sweep_ctrl_names(sweep) -> list[str]:
+    """Controller names for a Sweep or MultiSweep."""
+    if hasattr(sweep, 'controllers'):
+        return [c.name for c in sweep.controllers]
+    return [sweep.controller.name]
+
+
+def _find_sweep_by_ctrl(proc, name: str):
+    """Return the sweep whose (first) controller matches *name*, or None."""
+    for s in getattr(proc, 'sweeps', []):
+        if name in _sweep_ctrl_names(s):
+            return s
+    return None
+
+
+def _resolve_plot_type(spec: PlotSpec, proc) -> str:
+    """Resolve ``"auto"`` to a concrete plot type."""
+    if spec.plot_type != 'auto':
+        return spec.plot_type
+    if _is_array(spec.x):
+        return 'live_trace'
+    if _is_array(spec.y):
+        return 'trace_heatmap'
+    if spec.z and hasattr(proc, 'sweeps') and len(proc.sweeps) >= 2:
+        return 'heatmap'
+    return 'line'
+
+
+def _default_update_every(resolved_type: str, proc) -> str:
+    """Choose a sensible default ``update_every`` from the resolved plot type."""
+    if resolved_type in ('live_trace', 'trace_heatmap'):
+        return 'point'
+    if resolved_type == 'heatmap':
+        return 'plane' if len(getattr(proc, 'sweeps', [])) >= 3 else 'sweep'
+    return 'point'
+
+
+def _resolve_col(col, readout, label: str = 'col') -> int | None:
+    """Resolve a column specifier (int / str / None) to an integer index or None."""
+    if col is None:
+        return None
+    if isinstance(col, int):
+        return col
+    if isinstance(col, str):
+        if isinstance(readout.contains, list):
+            try:
+                return readout.contains.index(col)
+            except ValueError:
+                raise ValueError(
+                    f"{label}='{col}' not found in readout.contains="
+                    f"{readout.contains} for readout '{readout.name}'"
+                )
+        raise ValueError(
+            f"{label}='{col}' is a string but readout '{readout.name}' "
+            "has no contains list"
+        )
+    raise TypeError(f"{label} must be int, str, or None, got {type(col)}")
+
+
+def _normalize_y_col(y_col, readout) -> list[int] | None:
+    """Normalize ``y_col`` to ``list[int]`` or ``None``.
+
+    Returns ``None`` for SCALAR readouts, or when ``y_col`` is ``None``
+    (whole-array live_trace, direct SCALAR read).  Returns a list with one
+    element for single-column extraction; multi-element for multi-trace.
+    """
+    if readout is None or readout.kind == DataKind.SCALAR:
+        return None
+    if y_col is None:
+        return None
+    cols = y_col if isinstance(y_col, list) else [y_col]
+    return [_resolve_col(c, readout, 'y_col') for c in cols]
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -204,6 +311,7 @@ class PlotterBase(abc.ABC):
         self._fig_dict: dict | None = None
         self._proc = None
         self._resolved_types: list[str] = []
+        self._resolved_update_every: list[str] = []
         self._sweep_data: dict[int, dict] = {}
         self._trace_offsets: list[int] = []
         self._stopped = False
@@ -241,6 +349,7 @@ class PlotterBase(abc.ABC):
         self._proc = proc
         self._fig_dict = None
         self._resolved_types = []
+        self._resolved_update_every = []
         self._sweep_data = {}
         self._trace_offsets = []
         self._stopped = False
@@ -249,20 +358,12 @@ class PlotterBase(abc.ABC):
 
         n = len(self.specs)
 
-        # Resolve "auto" plot types
-        self._resolved_types = []
+        # Resolve plot types and update_every defaults
         for spec in self.specs:
-            if spec.plot_type == "auto":
-                if _is_array(spec.x):
-                    self._resolved_types.append("live_trace")
-                elif _is_array(spec.y):
-                    self._resolved_types.append("trace_heatmap")
-                elif spec.z and hasattr(proc, "sweeps") and len(proc.sweeps) >= 2:
-                    self._resolved_types.append("heatmap")
-                else:
-                    self._resolved_types.append("line")
-            else:
-                self._resolved_types.append(spec.plot_type)
+            ptype = _resolve_plot_type(spec, proc)
+            self._resolved_types.append(ptype)
+            uev = spec.update_every if spec.update_every is not None else _default_update_every(ptype, proc)
+            self._resolved_update_every.append(uev)
 
         # Validate readout names
         if hasattr(proc, "bench"):
@@ -309,7 +410,7 @@ class PlotterBase(abc.ABC):
 
         changed = False
         for i, (spec, ptype) in enumerate(zip(self.specs, self._resolved_types)):
-            if spec.update_every != event:
+            if self._resolved_update_every[i] != event:
                 continue
 
             if spec.update_func is not None:
@@ -324,7 +425,9 @@ class PlotterBase(abc.ABC):
                 if not isinstance(spec.y, str) or spec.y not in data:
                     continue
             else:
-                if not any(y in data for y in _y_list(spec)):
+                # line: check all state readout names
+                states = self._sweep_data.get(i, [])
+                if not any(s["_readout"] in data for s in states):
                     continue
 
             if ptype == "line":
@@ -363,78 +466,92 @@ class PlotterBase(abc.ABC):
                 spec.update_func(self._fig_dict, sample_idx, data)
                 continue
 
-            y_names = _y_list(spec)
-            if not any(y in data for y in y_names):
+            if ptype == "live_trace":
+                rname = spec.y if isinstance(spec.y, str) else None
+                if rname and rname in data:
+                    self.update_live_trace(i, spec, data)
                 continue
 
-            if ptype == "line":
-                states = self._sweep_data[i]
+            if ptype != "line":
+                continue
 
-                if spec.x == "_time":
-                    x_val, unit = self.format_elapsed(elapsed)
-                    axis_key = f"xaxis{i + 1}" if i > 0 else "xaxis"
-                    current_label = self._fig_dict["layout"].get(axis_key, {}).get("title", {})
-                    new_label = f"Time ({unit})"
-                    if current_label.get("text") != new_label:
-                        if axis_key not in self._fig_dict["layout"]:
-                            self._fig_dict["layout"][axis_key] = {}
-                        self._fig_dict["layout"][axis_key]["title"] = {"text": new_label}
-                        self._fig_dict["layout"][axis_key]["autorange"] = True
-                        for state in states:
-                            n = state["_n"]
-                            if n > 0 and state.get("_unit") != unit:
-                                divisor = self.unit_divisor(unit)
-                                state["x"][:n] = (state["_raw_t"][:n] - self._t0) / divisor
-                            state["_unit"] = unit
-                        if self._event_timestamps:
+            states = self._sweep_data[i]
+            if not any(s["_readout"] in data for s in states):
+                continue
+
+            if spec.x == "_time":
+                x_val, unit = self.format_elapsed(elapsed)
+                axis_key = f"xaxis{i + 1}" if i > 0 else "xaxis"
+                current_label = self._fig_dict["layout"].get(axis_key, {}).get("title", {})
+                new_label = f"Time ({unit})"
+                if current_label.get("text") != new_label:
+                    if axis_key not in self._fig_dict["layout"]:
+                        self._fig_dict["layout"][axis_key] = {}
+                    self._fig_dict["layout"][axis_key]["title"] = {"text": new_label}
+                    self._fig_dict["layout"][axis_key]["autorange"] = True
+                    for state in states:
+                        n = state["_n"]
+                        if n > 0 and state.get("_unit") != unit:
                             divisor = self.unit_divisor(unit)
-                            xref = "x" if i == 0 else f"x{i + 1}"
-                            new_xs = [
-                                (t - self._t0) / divisor for t in self._event_timestamps
-                            ]
-                            layout = self._fig_dict["layout"]
-                            ev_idx = 0
-                            for shape in layout.get("shapes", []):
-                                if shape.get("xref") == xref and ev_idx < len(new_xs):
-                                    shape["x0"] = new_xs[ev_idx]
-                                    shape["x1"] = new_xs[ev_idx]
-                                    ev_idx += 1
-                            ev_idx = 0
-                            for ann in layout.get("annotations", []):
-                                if ann.get("xref") == xref and ev_idx < len(new_xs):
-                                    ann["x"] = new_xs[ev_idx]
-                                    ev_idx += 1
+                            state["x"][:n] = (state["_raw_t"][:n] - self._t0) / divisor
+                        state["_unit"] = unit
+                    if self._event_timestamps:
+                        divisor = self.unit_divisor(unit)
+                        xref = "x" if i == 0 else f"x{i + 1}"
+                        new_xs = [
+                            (t - self._t0) / divisor for t in self._event_timestamps
+                        ]
+                        layout = self._fig_dict["layout"]
+                        ev_idx = 0
+                        for shape in layout.get("shapes", []):
+                            if shape.get("xref") == xref and ev_idx < len(new_xs):
+                                shape["x0"] = new_xs[ev_idx]
+                                shape["x1"] = new_xs[ev_idx]
+                                ev_idx += 1
+                        ev_idx = 0
+                        for ann in layout.get("annotations", []):
+                            if ann.get("xref") == xref and ev_idx < len(new_xs):
+                                ann["x"] = new_xs[ev_idx]
+                                ev_idx += 1
+            else:
+                x_val = data.get(spec.x, sample_idx)
+
+            x_float = float(x_val)
+
+            for j, state in enumerate(states):
+                rname = state["_readout"]
+                col = state["_col"]
+                if rname not in data:
+                    continue
+                raw = data[rname]
+                if col is None:
+                    y_float = float(raw)
                 else:
-                    x_val = data.get(spec.x, sample_idx)
+                    arr = np.asarray(raw)
+                    sub = arr[col]
+                    y_float = float(sub) if sub.ndim == 0 else float(sub.mean())
+                n = state["_n"]
+                cap = state["_cap"]
+                trace_idx = self._trace_offsets[i] + j
 
-                x_float = float(x_val)
+                if n < cap:
+                    state["x"][n] = x_float
+                    state["y"][n] = y_float
+                    if spec.x == "_time":
+                        state["_raw_t"][n] = timestamp
+                    state["_n"] = n + 1
+                else:
+                    state["x"][:-1] = state["x"][1:]
+                    state["y"][:-1] = state["y"][1:]
+                    if spec.x == "_time":
+                        state["_raw_t"][:-1] = state["_raw_t"][1:]
+                        state["_raw_t"][-1] = timestamp
+                    state["x"][-1] = x_float
+                    state["y"][-1] = y_float
 
-                for j, (y_name, state) in enumerate(zip(y_names, states)):
-                    if y_name not in data:
-                        continue
-                    y_float = float(data[y_name])
-                    n = state["_n"]
-                    cap = state["_cap"]
-                    trace_idx = self._trace_offsets[i] + j
-
-                    if n < cap:
-                        state["x"][n] = x_float
-                        state["y"][n] = y_float
-                        if spec.x == "_time":
-                            state["_raw_t"][n] = timestamp
-                        state["_n"] = n + 1
-                    else:
-                        state["x"][:-1] = state["x"][1:]
-                        state["y"][:-1] = state["y"][1:]
-                        if spec.x == "_time":
-                            state["_raw_t"][:-1] = state["_raw_t"][1:]
-                            state["_raw_t"][-1] = timestamp
-                        state["x"][-1] = x_float
-                        state["y"][-1] = y_float
-
-                    display_n = state["_n"]
-                    self._fig_dict["data"][trace_idx]["x"] = state["x"][:display_n]
-                    self._fig_dict["data"][trace_idx]["y"] = state["y"][:display_n]
+                display_n = state["_n"]
+                self._fig_dict["data"][trace_idx]["x"] = state["x"][:display_n]
+                self._fig_dict["data"][trace_idx]["y"] = state["y"][:display_n]
 
         self.on_data_changed()
 
@@ -541,26 +658,55 @@ class PlotterBase(abc.ABC):
             self._trace_offsets.append(trace_idx)
 
             if ptype == "line":
-                y_names = _y_list(spec)
-                for y_name in y_names:
+                # Build (readout_name, col_index, trace_label) for each trace
+                trace_specs_line = []
+                if isinstance(spec.y, list) and spec.y and isinstance(spec.y[0], str):
+                    # Multiple named readouts — legacy multi-trace mode
+                    for rname in spec.y:
+                        trace_specs_line.append((rname, None, rname))
+                else:
+                    rname = spec.y if isinstance(spec.y, str) else str(spec.y)
+                    readout = (
+                        proc.bench.readouts.get(rname)
+                        if hasattr(proc, "bench") and isinstance(spec.y, str)
+                        else None
+                    )
+                    resolved_cols = _normalize_y_col(spec.y_col, readout)
+                    if resolved_cols is None:
+                        trace_specs_line.append((rname, None, rname))
+                    else:
+                        orig_list = spec.y_col if isinstance(spec.y_col, list) else [spec.y_col]
+                        for col, orig in zip(resolved_cols, orig_list):
+                            label = orig if isinstance(orig, str) else f"{rname}[{col}]"
+                            trace_specs_line.append((rname, col, label))
+
+                for _rname, _col, _label in trace_specs_line:
                     fig.add_trace(
-                        go.Scatter(x=[], y=[], mode="lines+markers", name=y_name),
+                        go.Scatter(x=[], y=[], mode="lines+markers", name=_label),
                         row=row, col=1,
                     )
                     trace_idx += 1
-                fig.update_xaxes(title_text=spec.x, row=row, col=1)
+                x_label = spec.x if isinstance(spec.x, str) else ""
+                fig.update_xaxes(title_text=x_label, row=row, col=1)
                 fig.update_yaxes(
-                    title_text=" / ".join(y_names) if len(y_names) > 1 else y_names[0],
+                    title_text=" / ".join(t[2] for t in trace_specs_line),
                     row=row, col=1,
                 )
-                cap = proc.sweeps[-1].length if hasattr(proc, "sweeps") and proc.sweeps else self.max_display_pts
+                is_monitor = not hasattr(proc, "sweeps") or not proc.sweeps
+                if is_monitor:
+                    cap = self.max_display_pts
+                else:
+                    x_sweep = _find_sweep_by_ctrl(proc, spec.x) if isinstance(spec.x, str) else None
+                    cap = x_sweep.length if x_sweep is not None else proc.sweeps[-1].length
                 states = []
-                for _ in y_names:
+                for _rname, _col, _label in trace_specs_line:
                     st: dict = {
                         "x": np.empty(cap, dtype=np.float64),
                         "y": np.empty(cap, dtype=np.float64),
                         "_n": 0,
                         "_cap": cap,
+                        "_readout": _rname,
+                        "_col": _col,
                     }
                     if spec.x == "_time":
                         st["_raw_t"] = np.empty(cap, dtype=np.float64)
@@ -569,14 +715,12 @@ class PlotterBase(abc.ABC):
                 self._sweep_data[i] = states
 
             elif ptype == "heatmap":
-                x_sweep = next(
-                    (s for s in proc.sweeps if s.controller.name == spec.x),
-                    proc.sweeps[-1],
-                )
-                y_sweep = next(
-                    (s for s in proc.sweeps if s.controller.name == spec.y),
-                    proc.sweeps[0] if len(proc.sweeps) >= 2 else None,
-                )
+                x_sweep = _find_sweep_by_ctrl(proc, spec.x) if isinstance(spec.x, str) else None
+                if x_sweep is None and hasattr(proc, 'sweeps') and proc.sweeps:
+                    x_sweep = proc.sweeps[-1]
+                y_sweep = _find_sweep_by_ctrl(proc, spec.y) if isinstance(spec.y, str) else None
+                if y_sweep is None and hasattr(proc, 'sweeps') and len(proc.sweeps) >= 2:
+                    y_sweep = proc.sweeps[0]
                 x_vals = x_sweep.values
                 y_vals = y_sweep.values if y_sweep is not None else np.array([0])
                 z = np.full((len(y_vals), len(x_vals)), np.nan)
@@ -596,23 +740,43 @@ class PlotterBase(abc.ABC):
             elif ptype == "live_trace":
                 x_arr = np.asarray(spec.x, dtype=np.float64)
                 n_pts = len(x_arr)
-                y_label = spec.y if isinstance(spec.y, str) else "value"
-                fig.add_trace(
-                    go.Scatter(x=x_arr.tolist(), y=[np.nan] * n_pts, mode="lines", name=y_label),
+                rname_lt = spec.y if isinstance(spec.y, str) else "value"
+                readout_lt = (
+                    proc.bench.readouts.get(rname_lt)
+                    if hasattr(proc, "bench") and isinstance(spec.y, str)
+                    else None
+                )
+                resolved_lt = _normalize_y_col(spec.y_col, readout_lt)
+                if resolved_lt is None:
+                    col_specs_lt = [(None, rname_lt)]
+                else:
+                    orig_list_lt = spec.y_col if isinstance(spec.y_col, list) else [spec.y_col]
+                    col_specs_lt = []
+                    for col, orig in zip(resolved_lt, orig_list_lt):
+                        label = orig if isinstance(orig, str) else f"{rname_lt}[{col}]"
+                        col_specs_lt.append((col, label))
+                for _col_lt, _label_lt in col_specs_lt:
+                    fig.add_trace(
+                        go.Scatter(x=x_arr.tolist(), y=[np.nan] * n_pts, mode="lines", name=_label_lt),
+                        row=row, col=1,
+                    )
+                    trace_idx += 1
+                fig.update_xaxes(title_text="", row=row, col=1)
+                fig.update_yaxes(
+                    title_text=" / ".join(t[1] for t in col_specs_lt),
                     row=row, col=1,
                 )
-                fig.update_xaxes(title_text="", row=row, col=1)
-                fig.update_yaxes(title_text=y_label, row=row, col=1)
-                self._sweep_data[i] = [{"y": np.full(n_pts, np.nan)}]
-                trace_idx += 1
+                self._sweep_data[i] = [
+                    {"y": np.full(n_pts, np.nan), "_col": _col_lt}
+                    for _col_lt, _ in col_specs_lt
+                ]
 
             elif ptype == "trace_heatmap":
                 y_arr = np.asarray(spec.y, dtype=np.float64)
                 n_freq = len(y_arr)
-                x_sweep = next(
-                    (s for s in proc.sweeps if s.controller.name == spec.x),
-                    proc.sweeps[0],
-                )
+                x_sweep = _find_sweep_by_ctrl(proc, spec.x) if isinstance(spec.x, str) else None
+                if x_sweep is None and hasattr(proc, 'sweeps') and proc.sweeps:
+                    x_sweep = proc.sweeps[0]
                 x_vals = x_sweep.values
                 n_steps = len(x_vals)
                 z = np.full((n_freq, n_steps), np.nan)
@@ -654,27 +818,34 @@ class PlotterBase(abc.ABC):
         Sweep parameter as x: resets on each new inner sweep (O(1) pointer reset).
         Readout as x: accumulates all points across the full experiment.
         """
-        y_names = _y_list(spec)
         states = self._sweep_data[spec_idx]
-        x_from_sweep = spec.x in sweep_values
+        x_from_sweep = isinstance(spec.x, str) and spec.x in sweep_values
         x_val = sweep_values.get(spec.x) if x_from_sweep else data.get(spec.x)
 
-        for j, (y_name, state) in enumerate(zip(y_names, states)):
-            if y_name not in data:
+        for j, state in enumerate(states):
+            rname = state["_readout"]
+            col = state["_col"]
+            if rname not in data:
                 continue
-            y_val = data[y_name]
+            raw = data[rname]
             trace_idx = self._trace_offsets[spec_idx] + j
 
             if isinstance(x_val, np.ndarray):
-                # Sweep-level update: full row arrives at once (SWEEPWISE)
+                # Sweep-level update: full row arrives at once
                 length = len(x_val)
-                y_arr = y_val if isinstance(y_val, np.ndarray) else np.full(length, float(y_val))
+                if col is None:
+                    y_arr = raw if isinstance(raw, np.ndarray) else np.full(length, float(raw))
+                else:
+                    arr = np.asarray(raw)
+                    sub = arr[col]
+                    y_arr = sub if (sub.ndim == 1 and len(sub) == length) else np.full(length, float(sub.flat[0]))
+                y_arr = np.asarray(y_arr, dtype=np.float64)
                 if length > state["_cap"]:
                     state["x"] = np.empty(length, dtype=np.float64)
                     state["y"] = np.empty(length, dtype=np.float64)
                     state["_cap"] = length
                 state["x"][:length] = x_val
-                state["y"][:length] = y_arr
+                state["y"][:length] = y_arr[:length]
                 state["_n"] = length
             else:
                 x_float = float(x_val) if x_val is not None else float(state["_n"])
@@ -683,9 +854,15 @@ class PlotterBase(abc.ABC):
                 if x_from_sweep and n >= 2 and x_float <= state["x"][0]:
                     state["_n"] = 0
                     n = 0
+                if col is None:
+                    y_float = float(raw)
+                else:
+                    arr = np.asarray(raw)
+                    sub = arr[col]
+                    y_float = float(sub) if sub.ndim == 0 else float(sub.mean())
                 if n < state["_cap"]:
                     state["x"][n] = x_float
-                    state["y"][n] = float(y_val)
+                    state["y"][n] = y_float
                     state["_n"] = n + 1
 
             n = state["_n"]
@@ -707,17 +884,19 @@ class PlotterBase(abc.ABC):
         self._fig_dict["data"][self._trace_offsets[spec_idx]]["z"] = state["z"].tolist()
 
     def update_live_trace(self, spec_idx: int, spec: PlotSpec, data: dict) -> None:
-        """Overwrite the scatter trace with the current readout values."""
-        readout_name = spec.y
-        if not isinstance(readout_name, str) or readout_name not in data:
+        """Overwrite the live-trace scatter(s) with the current readout values."""
+        rname = spec.y
+        if not isinstance(rname, str) or rname not in data:
             return
-        raw = np.asarray(data[readout_name])
-        if hasattr(self._proc, "bench"):
-            readout = self._proc.bench.readouts[readout_name]
-            y_vals = self.extract_col(raw, spec.z_col, readout)
-        else:
-            y_vals = (raw[:, spec.z_col] if isinstance(spec.z_col, int) else raw).astype(np.float64)
-        self._fig_dict["data"][self._trace_offsets[spec_idx]]["y"] = y_vals.tolist()
+        raw = np.asarray(data[rname])
+        states = self._sweep_data[spec_idx]
+        for j, state in enumerate(states):
+            col = state["_col"]
+            if col is None:
+                y_vals = raw.astype(np.float64)
+            else:
+                y_vals = np.asarray(raw[col], dtype=np.float64)
+            self._fig_dict["data"][self._trace_offsets[spec_idx] + j]["y"] = y_vals.tolist()
 
     def update_trace_heatmap(self, spec_idx: int, spec: PlotSpec, index: tuple, data: dict) -> None:
         """Fill one column of the trace heatmap (one sweep step = one column)."""
@@ -736,42 +915,32 @@ class PlotterBase(abc.ABC):
     def resolve_col(self, z_col, readout) -> int | None:
         """Resolve ``z_col`` to an integer index, or None (use whole array).
 
-        Rules:
-          TRACE kind + z_col=None  → None (use whole 1-D array)
-          TRACE kind + z_col given → warning, ignored, return None
-          IMAGE kind + z_col=None  → 0 with a warning
-          IMAGE kind + int         → used directly
-          IMAGE kind + str         → looked up in ``readout.contains``
+        TRACE + z_col given  → warning, ignored, returns None.
+        IMAGE + z_col=None   → warning, defaults to 0.
+        IMAGE + int/str      → resolved via ``_resolve_col``.
         """
         if readout.kind == DataKind.TRACE:
             if z_col is not None:
-                print(f"Warning: z_col ignored for TRACE readout '{readout.name}'")
+                warnings.warn(
+                    f"z_col ignored for TRACE readout '{readout.name}'",
+                    stacklevel=2,
+                )
             return None
         # IMAGE kind
         if z_col is None:
-            print(f"Warning: z_col not set for IMAGE readout '{readout.name}', using column 0")
-            return 0
-        if isinstance(z_col, int):
-            return z_col
-        if isinstance(z_col, str):
-            if isinstance(readout.contains, list):
-                try:
-                    return readout.contains.index(z_col)
-                except ValueError:
-                    raise ValueError(
-                        f"z_col='{z_col}' not found in readout.contains={readout.contains}"
-                    )
-            raise ValueError(
-                f"z_col='{z_col}' is a string but readout '{readout.name}' has no contains list"
+            warnings.warn(
+                f"z_col not set for IMAGE readout '{readout.name}', defaulting to column 0",
+                stacklevel=2,
             )
-        raise TypeError(f"z_col must be int, str, or None, got {type(z_col)}")
+            return 0
+        return _resolve_col(z_col, readout, 'z_col')
 
     def extract_col(self, raw: np.ndarray, z_col, readout) -> np.ndarray:
         """Extract the relevant channel from raw readout data."""
         col = self.resolve_col(z_col, readout)
         if col is None:
             return raw.astype(np.float64)
-        return raw[col].astype(np.float64)
+        return np.asarray(raw[col], dtype=np.float64)
 
     @staticmethod
     def format_elapsed(elapsed_seconds: float) -> tuple[float, str]:
@@ -922,12 +1091,14 @@ class DashPlotter(PlotterBase):
             Input("interval", "n_intervals"),
         )
         def refresh(n):
-            # Stop updating once the experiment is done so zoom/pan is preserved
-            if plotter._stopped or plotter._data_version == plotter._last_sent_version:
-                from dash import no_update
-                return no_update
-            plotter._last_sent_version = plotter._data_version
-            return plotter._fig_dict
+            from dash import no_update
+            # Always flush pending data before checking stopped — this ensures
+            # the final batch of points written just before finalize() reaches
+            # the browser even if the experiment finished between two polls.
+            if plotter._data_version != plotter._last_sent_version:
+                plotter._last_sent_version = plotter._data_version
+                return plotter._fig_dict
+            return no_update
 
         # Suppress the Flask "Serving Flask app" CLI banner
         try:

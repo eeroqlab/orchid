@@ -797,7 +797,85 @@ print(meta["T_mc"])       # 0.015
 
 Orchid provides built-in live plotting using a Dash server that opens in a **separate browser window**. The plots update in real time as data is acquired. Create a `DashPlotter` (or its alias `LivePlotter`) with one or more `PlotSpec` objects and pass it to the runner.
 
-The plotter architecture separates data logic from the display backend: `PlotterBase` holds all figure-building and data-update code; `DashPlotter` adds the Dash/Werkzeug server on top. You can subclass `PlotterBase` directly to add other backends (e.g. Taipy) without touching the runner.
+The plotter architecture separates data logic from the display backend: `PlotterBase` holds all figure-building and data-update code; `DashPlotter` adds the Dash/Werkzeug server on top. A `TaipyPlotter` backend is also available for push-based (no-polling) updates.
+
+#### Scenarios at a glance
+
+Every combination of procedure type, readout kind, and plot style is covered. The table below shows what `PlotSpec` to write for each scenario. All `update_every` values are auto-resolved when left as `None` (the default).
+
+| # | Procedure | `DataKind` | Plot type | `x` | `y` | `y_col` | `z` / `z_col` |
+|---|-----------|------------|-----------|-----|-----|---------|---------------|
+| 1 | 1D sweep | `SCALAR` | line | sweep param | readout name | — | — |
+| 2 | 1D sweep | `TRACE` | line (col extraction) | sweep param | readout name | `int` or `str` | — |
+| 3 | 1D sweep | `TRACE` | multi-line | sweep param | readout name | `[col1, col2]` | — |
+| 4 | 1D sweep | `SCALAR` × N | multi-line (legacy) | sweep param | `[name1, name2]` | — | — |
+| 5 | 1D sweep | `TRACE` | live_trace | **array** (e.g. freqs) | readout name | — | — |
+| 6 | 1D sweep | `IMAGE` | live_trace (col) | **array** | readout name | `int` or `str` | — |
+| 7 | 1D sweep | `IMAGE` | live_trace multi-col | **array** | readout name | `[col1, col2]` | — |
+| 8 | 2D sweep | `SCALAR` | heatmap | inner param | outer param | — | readout / — |
+| 9 | 2D sweep | `TRACE` | trace_heatmap | sweep param | **array** | — | readout / — |
+| 10 | 2D sweep | `IMAGE` | trace_heatmap (col) | sweep param | **array** | — | readout / `str` or `int` |
+| 11 | Monitor | `SCALAR` | line vs time | `"_time"` | readout name | — | — |
+| 12 | Monitor | `TRACE` | line vs time (col) | `"_time"` | readout name | `int` or `str` | — |
+| 13 | Monitor | `TRACE` | multi-line vs time | `"_time"` | readout name | `[col1, col2]` | — |
+| 14 | Monitor | `TRACE` | live_trace | **array** | readout name | — | — |
+| 15 | Monitor | `IMAGE` | live_trace (col) | **array** | readout name | `int` or `str` | — |
+| 16 | Monitor | `SCALAR` × N | readout vs readout | readout name | readout name | — | — |
+
+> **Runnable demos:** `examples/demo_plot_scenarios.py` contains one complete simulated experiment per scenario above.
+> Run any of them with:
+> ```
+> python examples/demo_plot_scenarios.py <N>      # N = 1 … 16
+> python examples/demo_plot_scenarios.py list     # print the menu
+> ```
+
+---
+
+#### `y_col` — column extraction from TRACE and IMAGE readouts
+
+`y_col` selects one or more channels from a non-scalar readout for use in **line** and **live_trace** plots. It has no effect on `SCALAR` readouts.
+
+| `y_col` value | Behaviour |
+|---------------|-----------|
+| `None` (default) | Not used for SCALAR; use whole array for TRACE live_trace |
+| `int` | Zero-based channel index |
+| `str` | Channel name, resolved via `readout.contains` |
+| `[col1, col2, …]` | Multiple channels → one trace per channel on the same subplot |
+
+For `TRACE` shape `(N,)`: `y_col` indexes elements → one scalar per sweep point → line plot.
+For `IMAGE` shape `(N_ch, N_pts)`: `y_col` indexes the channel (first) axis → one spectrum per sweep point → live_trace.
+
+```python
+# Lock-in returning [X, Y] as TRACE shape (2,) — plot X component only
+bench.add_readout("lockin", kind="trace", shape=(2,),
+    contains=["X", "Y"], get_func=lockin.read_xy)
+
+plotter = LivePlotter([PlotSpec(x="Vgt", y="lockin", y_col="X")])
+
+# Same readout, plot both components as two traces in one subplot
+plotter = LivePlotter([PlotSpec(x="Vgt", y="lockin", y_col=["X", "Y"])])
+
+# VNA returning (freq, mag, phase) as IMAGE shape (3, N_freq) — live spectrum
+bench.add_readout("vna", kind="image", shape=(3, 1601),
+    contains=["freq", "mag", "phase"], get_func=vna.get_trace)
+
+plotter = LivePlotter([PlotSpec(x=flist, y="vna", y_col="mag")])
+```
+
+#### `z_col` — column extraction for heatmap color axis
+
+`z_col` applies only to `trace_heatmap` plots where the readout is `IMAGE`. It selects which channel becomes the heatmap color. Same int/str semantics as `y_col`.
+
+```python
+# Accumulate VNA magnitude vs gate voltage as a heatmap
+plotter = LivePlotter([
+    PlotSpec(x="Vgt", y=flist, z="vna", z_col="mag"),
+])
+```
+
+For `TRACE` readouts (1D array), `z_col` is not needed — the whole array is used automatically.
+
+---
 
 #### 1D sweep — line plot
 
@@ -806,12 +884,11 @@ from orchid import LivePlotter, PlotSpec
 
 plotter = LivePlotter([PlotSpec(x="Vgt", y="lockin_X")])
 runner.run(proc, plotter=plotter)
-# A live line plot appears and updates as data is acquired
 ```
 
 #### 2D sweep — heatmap
 
-For 2D scans, specify `x` (inner sweep), `y` (outer sweep), and `z` (readout for color). The heatmap fills row-by-row as each inner sweep completes:
+For 2D scans, specify `x` (inner/fast sweep), `y` (outer/slow sweep), and `z` (readout for color). The heatmap fills row-by-row as each inner sweep completes:
 
 ```python
 plotter = LivePlotter([PlotSpec(x="fac", y="Vgt", z="lockin_X")])
@@ -830,28 +907,31 @@ runner.run(proc, plotter=plotter)
 
 #### Multiple traces in one subplot
 
-Pass a list to `y` to overlay several readouts in the same axes — useful for comparing
-channels (e.g. X and Y from a lock-in, or signal vs. reference):
+**Two named readouts (both SCALAR):**
 
 ```python
 plotter = LivePlotter([
-    PlotSpec(x="Vgt", y=["lockin_X", "lockin_Y"]),   # both on one subplot
+    PlotSpec(x="Vgt", y=["lockin_X", "lockin_Y"]),   # overlay on one subplot
 ])
-runner.run(proc, plotter=plotter)
+```
+
+**One TRACE readout, multiple columns via `y_col`:**
+
+```python
+# Lock-in returns [X, Y] as a single TRACE readout
+plotter = LivePlotter([
+    PlotSpec(x="Vgt", y="lockin", y_col=["X", "Y"]),
+])
 ```
 
 Mix single and multi-trace subplots freely:
 
 ```python
 plotter = LivePlotter([
-    PlotSpec(x="Vgt", y=["lockin_X", "lockin_Y"]),   # XY on top
-    PlotSpec(x="Vgt", y="temperature"),               # temperature below
+    PlotSpec(x="Vgt", y="lockin", y_col=["X", "Y"]),   # XY on top
+    PlotSpec(x="Vgt", y="temperature"),                  # temperature below
 ])
 ```
-
-All readout names passed in `y` must be present in the procedure's `readouts` list.
-If a readout is missing from a particular data point (e.g. due to an error), that
-trace is silently skipped for that update.
 
 #### Heatmap colorscale
 
@@ -868,67 +948,56 @@ plotter = LivePlotter([
 
 #### Live trace (VNA / spectrum at each step)
 
-When `x` is a fixed array (e.g. a frequency list), the plot type auto-detects as `live_trace` — a line plot whose y values are **overwritten** at each sweep step to show the most recent trace. Set `update_every="point"` so it refreshes at every measurement, and use `z_col` to pick a column from a multi-column (`IMAGE`) readout:
+When `x` is a fixed array (e.g. a frequency list), the plot type auto-detects as `live_trace` — a line plot whose y values are **overwritten** at each sweep step to show the most recent trace.
 
 ```python
 flist = np.linspace(4e9, 8e9, 1601)
 
-# VNA trace readout (IMAGE, 3 columns: f, mag, phase)
-bench.add_readout("S21", kind="image", shape=(3, 1601),
-    get_func=vna.get_trace, contains=["f", "mag", "phase"])
+# Plain TRACE readout (1D array) — whole spectrum shown, no y_col needed
+bench.add_readout("mag", kind="trace", shape=(1601,), get_func=vna.get_magnitude)
+plotter = LivePlotter([PlotSpec(x=flist, y="mag")])
 
-# Live line plot: shows current VNA magnitude, refreshing at each power step
+# IMAGE readout (freq, mag, phase) — select one channel with y_col
+bench.add_readout("S21", kind="image", shape=(3, 1601),
+    get_func=vna.get_trace, contains=["freq", "mag", "phase"])
+plotter = LivePlotter([PlotSpec(x=flist, y="S21", y_col="mag")])
+
+# Show magnitude and phase in separate subplots simultaneously
 plotter = LivePlotter([
-    PlotSpec(x=flist, y="S21", z_col="mag", update_every="point"),
+    PlotSpec(x=flist, y="S21", y_col="mag"),
+    PlotSpec(x=flist, y="S21", y_col="phase"),
 ])
 runner.run(proc_power_sweep, plotter=plotter)
 ```
 
-For a plain `TRACE` readout (1D array, no columns), `z_col` is not needed:
-
-```python
-bench.add_readout("mag", kind="trace", shape=(1601,), get_func=vna.get_magnitude)
-
-plotter = LivePlotter([
-    PlotSpec(x=flist, y="mag", update_every="point"),
-])
-```
-
 #### Trace heatmap (VNA)
 
-When `y` is a fixed array (e.g. frequencies) and `x` is a sweep parameter, the plot auto-detects as `trace_heatmap` — a heatmap that **accumulates** one column per sweep step. The x-axis is the sweep parameter (e.g. VNA power) and the y-axis is the fixed array (frequencies). Useful for visualising how a VNA trace evolves with a control parameter:
+When `y` is a fixed array (e.g. frequencies) and `x` is a sweep parameter, the plot auto-detects as `trace_heatmap` — a heatmap that **accumulates** one column per sweep step. The x-axis is the sweep parameter and the y-axis is the fixed array.
 
 ```python
 flist = np.linspace(4e9, 8e9, 1601)
 
-bench.add_readout("S21", kind="image", shape=(3, 1601),
-    get_func=vna.get_trace, contains=["f", "mag", "phase"])
+# Plain TRACE readout — no z_col needed
+bench.add_readout("mag", kind="trace", shape=(1601,), get_func=vna.get_magnitude)
+plotter = LivePlotter([PlotSpec(x="vna_power", y=flist, z="mag")])
 
-# Heatmap: x=power step, y=frequency, color=magnitude
+# IMAGE readout — pick the magnitude channel with z_col
+bench.add_readout("S21", kind="image", shape=(3, 1601),
+    get_func=vna.get_trace, contains=["freq", "mag", "phase"])
 plotter = LivePlotter([
-    PlotSpec(x="vna_power", y=flist, z="S21", z_col="mag",
-             update_every="point"),
+    PlotSpec(x="vna_power", y=flist, z="S21", z_col="mag"),
 ])
 runner.run(proc_power_sweep, plotter=plotter)
 ```
 
 > **Note on axes:** `x` is the sweep parameter — it maps to the *x-axis* of the heatmap (each step adds a new column). `y` is the fixed array — it maps to the *y-axis*. This matches how VNA waterfall plots are normally displayed (frequency on y, power on x, color = magnitude).
 
-**`z_col` selector:**
-
-| `z_col` value | Behaviour |
-|---------------|-----------|
-| `None`        | Use the whole array (valid for `TRACE` readouts) |
-| `int`         | Use that column index (0-based) |
-| `str`         | Look up column by name in `readout.contains` list |
-
 Combine `live_trace` and `trace_heatmap` in one plotter for a complete VNA dashboard:
 
 ```python
 plotter = LivePlotter([
-    PlotSpec(x=flist, y="S21", z_col="mag", update_every="point"),   # current trace
-    PlotSpec(x="vna_power", y=flist, z="S21", z_col="mag",
-             update_every="point"),                                    # waterfall
+    PlotSpec(x=flist, y="S21", y_col="mag"),               # current trace
+    PlotSpec(x="vna_power", y=flist, z="S21", z_col="mag"), # waterfall
 ])
 runner.run(proc_power_sweep, plotter=plotter)
 ```
@@ -938,7 +1007,30 @@ runner.run(proc_power_sweep, plotter=plotter)
 When `x="_time"`, the x-axis shows elapsed time starting from zero. The axis label auto-scales: seconds (s) for < 2 min, minutes (min) for < 2 hr, hours (hr) beyond that.
 
 ```python
+# Scalar readout vs time
 plotter = LivePlotter([PlotSpec(x="_time", y="temperature")])
+runner.run_monitor(monitor, plotter=plotter)
+
+# TRACE readout — extract one component vs time
+plotter = LivePlotter([PlotSpec(x="_time", y="lockin", y_col="X")])
+
+# TRACE readout — plot both components as two rolling lines
+plotter = LivePlotter([PlotSpec(x="_time", y="lockin", y_col=["X", "Y"])])
+
+# IMAGE readout — live spectrum (single channel) that refreshes every sample
+plotter = LivePlotter([PlotSpec(x=flist, y="vna", y_col="mag")])
+runner.run_monitor(monitor_vna, plotter=plotter)
+
+# TRACE readout — live spectrum (whole array) that refreshes every sample
+plotter = LivePlotter([PlotSpec(x=flist, y="mag")])
+runner.run_monitor(monitor_vna, plotter=plotter)
+```
+
+**Readout vs readout** — when `x` is a readout name (not `"_time"` and not an array), each sample plots `(x_readout, y_readout)` as a trajectory point. Both readouts must be measured each sample. Useful for IQ plots and Lissajous-style traces:
+
+```python
+# Lock-in X vs Y — traces a circle in IQ space as the resonance is swept
+plotter = LivePlotter([PlotSpec(x="lockin_X", y="lockin_Y")])
 runner.run_monitor(monitor, plotter=plotter)
 ```
 
@@ -955,103 +1047,65 @@ bench["Vgt"] = 0.5   # change gate voltage while monitoring
 data_dir = runner.stop_monitor()
 ```
 
+#### `update_every` — when the plot refreshes
+
+`update_every` controls which runner event triggers a plot update. The default (`None`) is **auto-resolved** from the plot type and sweep depth:
+
+| Plot type | Default `update_every` |
+|-----------|------------------------|
+| `line` | `"point"` |
+| `live_trace` | `"point"` |
+| `trace_heatmap` | `"point"` |
+| `heatmap` (2D) | `"sweep"` |
+| `heatmap` (3D+) | `"plane"` |
+
+Override when needed:
+
+```python
+# Save per sweep (fast I/O), but plot every point (real-time visual)
+proc = Procedure(..., write_mode=WriteMode.SWEEPWISE)
+plotter = LivePlotter([PlotSpec(x="Vgt", y="sig")])          # auto → "point"
+runner.run(proc, plotter=plotter)
+
+# Explicitly slow the plot refresh down to once per inner sweep
+plotter = LivePlotter([PlotSpec(x="Vgt", y="sig", update_every="sweep")])
+
+# Multiple subplots with different update rates
+plotter = LivePlotter([
+    PlotSpec(x="Vgt", y="lockin_X"),                         # auto → "point"
+    PlotSpec(x="fac",  y="Vgt", z="lockin_X"),               # auto → "sweep"
+])
+```
+
+| `update_every` value | Updates on |
+|----------------------|------------|
+| `"point"` | Every measurement point |
+| `"sweep"` | Each inner sweep completion |
+| `"plane"` | Each 2D plane completion (3D scans) |
+| `None` (default) | Auto-determined from plot type and sweep depth |
+
+Note that `update_every` is **independent** of `write_mode` — you can save data in large batches while still seeing every point appear live.
+
 #### Custom update function
 
-When `update_func` is set on a PlotSpec, the default line/heatmap logic is skipped entirely. Instead, your function is called every time new data is written. It receives three arguments:
+When `update_func` is set on a `PlotSpec`, the default line/heatmap logic is skipped entirely. Your function is called every time a matching event fires:
 
 | Argument | Type | Description |
 |----------|------|-------------|
-| `fig` | `FigureWidget` | The plotly figure. `fig.data[0]` is the trace for the first PlotSpec, `fig.data[1]` for the second, etc. |
-| `index` | `tuple` | Current sweep index, e.g. `(3,)` for 1D, `(2, 5)` for 2D. For monitors, this is `sample_idx` (int). |
-| `data` | `dict` | Readout name to value(s) just measured. Scalar for POINTWISE, array for SWEEPWISE. |
-
-**Plot magnitude of a complex trace:**
+| `fig` | `dict` | The Plotly figure dict. `fig["data"][0]` is the first trace. |
+| `index` | `tuple` | Current sweep index, e.g. `(3,)` for 1D, `(2, 5)` for 2D. Monitor: `sample_idx` (int). |
+| `data` | `dict` | Readout name → value(s) just measured. |
 
 ```python
 import numpy as np
 
 def plot_s21_mag(fig, index, data):
     s21 = data["S21"]
-    mag_db = 20 * np.log10(np.abs(s21))
-    fig.data[0].y = mag_db
+    fig["data"][0]["y"] = (20 * np.log10(np.abs(s21))).tolist()
 
 plotter = LivePlotter([PlotSpec(x="freq", y="S21", update_func=plot_s21_mag)])
 runner.run(proc, plotter=plotter)
 ```
-
-**Accumulate points with color coding:**
-
-```python
-xs, ys = [], []
-
-def accumulate(fig, index, data):
-    xs.append(index[0])
-    ys.append(data["lockin_X"])
-    colors = ["red" if v > 0.5 else "blue" for v in ys]
-
-    with fig.batch_update():
-        fig.data[0].x = xs
-        fig.data[0].y = ys
-        fig.data[0].marker.color = colors
-
-plotter = LivePlotter([PlotSpec(x="Vgt", y="lockin_X", update_func=accumulate)])
-runner.run(proc, plotter=plotter)
-```
-
-**2D heatmap with derivative (SWEEPWISE):**
-
-```python
-import numpy as np
-
-# In SWEEPWISE mode, data["lockin_X"] is a full row (array)
-z_matrix = np.full((50, 200), np.nan)
-
-def plot_derivative(fig, index, data):
-    row = index[0]  # outer sweep index
-    trace = data["lockin_X"]  # shape (200,)
-    z_matrix[row, :] = np.gradient(trace)
-    fig.data[0].z = z_matrix
-
-plotter = LivePlotter([PlotSpec(x="fac", y="lockin_X", update_func=plot_derivative)])
-runner.run(proc_2d, plotter=plotter)
-```
-
-**Key points:**
-- `fig.data[N]` corresponds to the Nth `PlotSpec` in the list
-- Use `with fig.batch_update():` when updating multiple properties at once (prevents flicker)
-- Capture external state via closures (like `z_matrix` or `xs, ys` above)
-- For POINTWISE: called every point, `data` values are scalars
-- For SWEEPWISE: called every inner sweep, `data` values are arrays
-
-#### Plot update frequency vs write mode
-
-The plot update frequency (`update_every`) is **independent** of the data write mode (`write_mode`). You can save data efficiently in large batches while still seeing every point appear live:
-
-```python
-# Save per sweep (fast I/O), but plot every point (real-time visual)
-proc = Procedure(..., write_mode=WriteMode.SWEEPWISE)
-plotter = LivePlotter([PlotSpec(x="Vgt", y="sig", update_every="point")])
-runner.run(proc, plotter=plotter)
-
-# Save per sweep, plot per sweep (both aligned — default)
-plotter = LivePlotter([PlotSpec(x="Vgt", y="sig", update_every="sweep")])
-
-# Save per plane, plot per sweep (see rows fill in on a 3D scan)
-proc = Procedure(..., write_mode=WriteMode.PLANEWISE)
-plotter = LivePlotter([PlotSpec(x="fac", y="sig", update_every="sweep")])
-
-# Multiple subplots with different update rates
-plotter = LivePlotter([
-    PlotSpec(x="Vgt", y="lockin_X", update_every="point"),   # real-time
-    PlotSpec(x="fac", y="S21", update_every="sweep"),         # per row
-])
-```
-
-| `update_every` | Updates on                           |
-|-----------------|--------------------------------------|
-| `"point"`       | Every measurement point              |
-| `"sweep"`       | Each inner sweep completion          |
-| `"plane"`       | Each 2D plane completion (3D scans)  |
 
 #### Configuration
 
@@ -1059,26 +1113,26 @@ plotter = LivePlotter([
 plotter = LivePlotter(
     [PlotSpec(x="Vgt", y="sig")],
     port=8050,            # Dash server port (default 8050)
-    height=400,           # pixels per subplot
+    height=400,           # pixels per subplot row
     width=800,            # figure width
-    open_browser=True,    # auto-open browser (default True)
+    open_browser=True,    # auto-open browser tab
     update_interval=500,  # poll interval in ms (default 500)
 )
 ```
 
-The Dash server runs on a background daemon thread. After the experiment completes, the server stops refreshing (zoom/pan is preserved) but stays running for inspection. Shut it down to free the port with:
+The Dash server runs on a background daemon thread. After the experiment completes, the server stops refreshing (zoom/pan is preserved) but stays alive for inspection. Free the port with:
 
 ```python
 plotter.stop()
 ```
 
-A `LivePlotter` can be reused across experiments — `setup()` automatically stops the previous server and resets all state:
+A `LivePlotter` can be reused across experiments — `setup()` resets all state without restarting the server:
 
 ```python
-plotter = LivePlotter([PlotSpec(x="Vgt", y="sig", update_every="point")])
+plotter = LivePlotter([PlotSpec(x="Vgt", y="sig")])
 
 runner.run(proc1, plotter=plotter)  # first experiment
-runner.run(proc2, plotter=plotter)  # fresh plot, old server cleaned up
+runner.run(proc2, plotter=plotter)  # fresh plot, same browser tab
 ```
 
 ---
