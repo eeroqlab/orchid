@@ -492,10 +492,8 @@ class Bench:
         if name in self.readouts:
             rd = self.readouts[name]
             if isinstance(rd, VirtualReadout):
-                raise RuntimeError(
-                    f"Readout {name!r} is a VirtualReadout — use compute(data) "
-                    "with measured source data, not bench[name]"
-                )
+                data = {src: self.readouts[src].read() for src in rd.sources}
+                return rd.compute(data)
             return rd.read()
         raise KeyError(f"No controller or readout named {name!r}")
 
@@ -516,7 +514,11 @@ class Bench:
                 }
                 self._event_log.append(entry)
                 if self._event_callback is not None:
-                    self._event_callback(entry)
+                    try:
+                        self._event_callback(entry)
+                    except Exception as e:
+                        import warnings
+                        warnings.warn(f"Event callback error for {name!r}: {e}")
         else:
             raise KeyError(f"No controller named {name!r}")
 
@@ -584,7 +586,16 @@ class Bench:
             elif name in self.readouts:
                 r = self.readouts[name]
                 if isinstance(r, VirtualReadout):
-                    rows.append([name, f"virtual / {r.kind.value}", "—", r.unit or "", f"sources={r.sources}"])
+                    try:
+                        src_data = {s: self.readouts[s].read() for s in r.sources}
+                        val = r.compute(src_data)
+                        if r.kind.value == "trace":
+                            val = "[...]"
+                        elif r.kind.value == "image":
+                            val = "[[...]]"
+                    except Exception as e:
+                        val = f"ERR: {e}"
+                    rows.append([name, f"virtual / {r.kind.value}", val, r.unit or "", f"sources={r.sources}"])
                 else:
                     try:
                         val = r.read()

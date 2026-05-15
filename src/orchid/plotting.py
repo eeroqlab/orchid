@@ -579,7 +579,7 @@ class PlotterBase(abc.ABC):
         self._event_timestamps.append(timestamp)
 
         for i, spec in enumerate(self.specs):
-            if spec.x != "_time":
+            if not isinstance(spec.x, str) or spec.x != "_time":
                 continue
 
             xref = "x" if i == 0 else f"x{i + 1}"
