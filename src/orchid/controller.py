@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import abc
 import asyncio
 import inspect
 import warnings
@@ -53,51 +54,34 @@ class LimitEntry(NamedTuple):
     clamped: float
 
 
-@dataclass
-class Controller:
-    """A named control parameter mapped to an instrument channel.
+# ══════════════════════════════════════════════════════════════════════
+#  ControllerBase — shared identity, limits, and bookkeeping
+# ══════════════════════════════════════════════════════════════════════
 
-    Can be used for both setting and reading values. Provide either
-    an instrument+attr pair or custom get_func/set_func callables.
+class ControllerBase(abc.ABC):
+    """Abstract base for all controller types.
 
-    Parameters
-    ----------
-    name : str
-        Short label, e.g. "Vgt", "fac".
-    instrument : InstrumentAdapter, optional
-        Instrument this controller belongs to.
-    attr : str, optional
-        Attribute name on the instrument.
-    get_func : callable, optional
-        Custom getter (overrides instrument.get).
-    set_func : callable, optional
-        Custom setter (overrides instrument.set).
-    unit : str, optional
-        Physical unit.
-    limits : tuple[float, float] or None, optional
-        ``(lo, hi)`` inclusive bounds. ``None`` means unconstrained.
-    limit_policy : LimitPolicy, optional
-        How to respond to limit violations. Default is ``WARN``.
+    Holds shared state (name, unit, limits, limit log) and enforces the
+    ``set`` / ``aset`` interface.  Subclasses implement the actual
+    dispatch to hardware (:class:`PhysicalController`) or to other
+    controllers (:class:`VirtualController`).
     """
 
-    name: str
-    instrument: InstrumentAdapter | None = None
-    attr: str | None = None
-    get_func: Callable[[], Any] | None = None
-    set_func: Callable[[Any], None] | None = None
-    unit: str | None = None
-    limits: tuple[float, float] | None = None
-    limit_policy: LimitPolicy = LimitPolicy.WARN
-
-    def __post_init__(self):
-        if self.instrument is None and self.get_func is None and self.set_func is None:
-            raise ValueError(
-                f"Controller {self.name!r}: provide instrument+attr or get_func/set_func"
-            )
-        # Runtime state — not dataclass fields so they don't appear in repr/eq
+    def __init__(
+        self,
+        name: str,
+        unit: str | None = None,
+        limits: tuple[float, float] | None = None,
+        limit_policy: LimitPolicy = LimitPolicy.WARN,
+    ) -> None:
+        self.name = name
+        self.unit = unit
+        self.limits = limits
+        self.limit_policy = limit_policy
+        # Runtime state — not included in repr/eq
         self._limit_hit: bool = False
         self._limit_log: list[LimitEntry] = []
-        self._sweep_index: tuple = ()  # set by runner before each aset()
+        self._sweep_index: tuple = ()   # set by runner before each aset()
 
     # ── Limit helpers ─────────────────────────────────────────────────
 
@@ -138,17 +122,96 @@ class Controller:
 
         return clamped
 
+    # ── Abstract interface ─────────────────────────────────────────────
+
+    @abc.abstractmethod
+    def set(self, value: float) -> None:
+        """Apply ``value`` (after clamping)."""
+
+    @abc.abstractmethod
+    async def aset(self, value: float) -> None:
+        """Apply ``value`` asynchronously (after clamping)."""
+
+    def get(self) -> Any:
+        """Read current value.
+
+        Raises ``RuntimeError`` for virtual controllers which have no
+        readback path. Override in :class:`PhysicalController`.
+        """
+        raise RuntimeError(
+            f"Controller {self.name!r} is a virtual controller and has no readback."
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  PhysicalController — wraps a real instrument channel
+# ══════════════════════════════════════════════════════════════════════
+
+class PhysicalController(ControllerBase):
+    """A named control parameter mapped to an instrument channel.
+
+    Provide either an ``instrument + attr`` pair or custom
+    ``get_func`` / ``set_func`` callables.
+
+    Parameters
+    ----------
+    name : str
+        Short label, e.g. ``"Vgt"``, ``"fac"``.
+    instrument : InstrumentAdapter, optional
+        Instrument this controller belongs to.
+    attr : str, optional
+        Attribute name on the instrument.
+    get_func : callable, optional
+        Custom getter (overrides ``instrument.get``).
+    set_func : callable, optional
+        Custom setter (overrides ``instrument.set``).
+    unit : str, optional
+        Physical unit.
+    limits : tuple[float, float] or None, optional
+        ``(lo, hi)`` inclusive bounds. ``None`` means unconstrained.
+    limit_policy : LimitPolicy, optional
+        How to respond to limit violations. Default is ``WARN``.
+
+    Examples
+    --------
+    >>> ctrl = PhysicalController("Vgt", set_func=qdac.ch01.set, get_func=qdac.ch01.get)
+    >>> ctrl.set(-0.5)
+    >>> ctrl.get()
+    -0.5
+    """
+
+    def __init__(
+        self,
+        name: str,
+        instrument: InstrumentAdapter | None = None,
+        attr: str | None = None,
+        get_func: Callable[[], Any] | None = None,
+        set_func: Callable[[Any], None] | None = None,
+        unit: str | None = None,
+        limits: tuple[float, float] | None = None,
+        limit_policy: LimitPolicy = LimitPolicy.WARN,
+    ) -> None:
+        super().__init__(name, unit=unit, limits=limits, limit_policy=limit_policy)
+        if instrument is None and get_func is None and set_func is None:
+            raise ValueError(
+                f"PhysicalController {name!r}: provide instrument+attr or get_func/set_func"
+            )
+        self.instrument = instrument
+        self.attr = attr
+        self.get_func = get_func
+        self.set_func = set_func
+
     # ── Public API ────────────────────────────────────────────────────
 
     def get(self) -> Any:
-        """Read current value."""
+        """Read current value from instrument or get_func."""
         if self.get_func is not None:
             return self.get_func()
-        elif self.instrument is not None:
+        if self.instrument is not None:
             return self.instrument.get(self.attr)
         raise RuntimeError(f"Controller {self.name!r} is set-only (no getter)")
 
-    def set(self, value: Any) -> None:
+    def set(self, value: float) -> None:
         """Clamp value to limits (if set) and apply."""
         value = self._clamp(float(value))
         if self.set_func is not None:
@@ -159,13 +222,14 @@ class Controller:
             raise RuntimeError(f"Controller {self.name!r} is read-only (no setter)")
 
     async def aget(self) -> Any:
+        """Read current value asynchronously."""
         if self.get_func is not None:
             if inspect.iscoroutinefunction(self.get_func):
                 return await self.get_func()
             return await asyncio.to_thread(self.get_func)
         return await self.instrument.aget(self.attr)
 
-    async def aset(self, value: Any) -> None:
+    async def aset(self, value: float) -> None:
         """Clamp value to limits (if set) and apply asynchronously."""
         value = self._clamp(float(value))
         if self.set_func is not None:
@@ -181,8 +245,119 @@ class Controller:
     def __repr__(self) -> str:
         src = self.attr or "callable"
         lim = f", limits={self.limits}" if self.limits is not None else ""
-        return f"Controller({self.name!r}, {src}, unit={self.unit!r}{lim})"
+        return f"PhysicalController({self.name!r}, {src}, unit={self.unit!r}{lim})"
 
+
+# ══════════════════════════════════════════════════════════════════════
+#  VirtualController — dispatches to physical controllers via a binding
+# ══════════════════════════════════════════════════════════════════════
+
+class VirtualController(ControllerBase):
+    """A controller that dispatches to physical controllers via a binding function.
+
+    No readback path — ``get()`` raises ``RuntimeError``.
+
+    Two binding modes:
+
+    **Linear** — ``binding`` is a ``dict[str, float]`` mapping each target
+    controller name to a scale factor.  ``set(v)`` calls
+    ``target.set(factor * v)`` for every entry::
+
+        VirtualController("VP1", binding={"P1": 1.0, "P2": 0.5}, registry=...)
+
+    **Callable** — ``binding`` is a function ``f(v) -> dict[str, float]``
+    that maps the virtual value to a per-controller target dict::
+
+        VirtualController("VP1",
+            binding=lambda v: {"P1": np.tanh(v), "P2": v ** 2},
+            registry=...)
+
+    Parameters
+    ----------
+    name : str
+        Short label, e.g. ``"VP1"``.
+    binding : dict[str, float] or callable
+        Linear weights or arbitrary mapping function.
+    registry : dict[str, ControllerBase]
+        Live reference to the bench's controller dict.  Target lookups
+        happen at ``set`` time, so controllers added after construction
+        are automatically available.
+    unit : str, optional
+        Physical unit.
+    limits : tuple[float, float] or None, optional
+        ``(lo, hi)`` bounds applied to the *virtual* value before dispatch.
+    limit_policy : LimitPolicy, optional
+        How to respond to limit violations. Default is ``WARN``.
+
+    Examples
+    --------
+    Cross-capacitance correction (linear)::
+
+        bench.add_virtual_controller("VP1", binding={"P1": 1.0, "B1": -0.3})
+        bench["VP1"] = -0.5   # → P1.set(-0.5), B1.set(0.15)
+
+    Non-linear binding (callable)::
+
+        bench.add_virtual_controller(
+            "VB",
+            binding=lambda v: {"B1": v, "B2": v + 0.05 * v**2},
+        )
+    """
+
+    def __init__(
+        self,
+        name: str,
+        binding: dict[str, float] | Callable[[float], dict[str, float]],
+        registry: dict[str, ControllerBase],
+        unit: str | None = None,
+        limits: tuple[float, float] | None = None,
+        limit_policy: LimitPolicy = LimitPolicy.WARN,
+    ) -> None:
+        super().__init__(name, unit=unit, limits=limits, limit_policy=limit_policy)
+        self._binding = binding
+        self._registry = registry   # live reference — not a copy
+
+    # ── Internal ──────────────────────────────────────────────────────
+
+    def _resolve_targets(self, value: float) -> dict[str, float]:
+        """Return {ctrl_name: target_value} for the given virtual value."""
+        if callable(self._binding):
+            return self._binding(value)
+        return {name: coeff * value for name, coeff in self._binding.items()}
+
+    # ── Public API ────────────────────────────────────────────────────
+
+    def set(self, value: float) -> None:
+        """Clamp to virtual limits then dispatch to all bound controllers."""
+        value = self._clamp(float(value))
+        for ctrl_name, ctrl_val in self._resolve_targets(value).items():
+            self._registry[ctrl_name].set(ctrl_val)
+
+    async def aset(self, value: float) -> None:
+        """Clamp to virtual limits then set all bound controllers concurrently."""
+        value = self._clamp(float(value))
+        targets = self._resolve_targets(value)
+        await asyncio.gather(*[
+            self._registry[name].aset(val)
+            for name, val in targets.items()
+        ])
+
+    def __repr__(self) -> str:
+        if callable(self._binding):
+            binding_repr = f"callable({getattr(self._binding, '__name__', '?')})"
+        else:
+            binding_repr = "{" + ", ".join(f"{k}: {v}" for k, v in self._binding.items()) + "}"
+        lim = f", limits={self.limits}" if self.limits is not None else ""
+        return f"VirtualController({self.name!r}, binding={binding_repr}{lim})"
+
+
+# Backward-compatible alias — existing code using Controller keeps working
+Controller = PhysicalController
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Readout — read-only measurement channel
+# ══════════════════════════════════════════════════════════════════════
 
 @dataclass
 class Readout:

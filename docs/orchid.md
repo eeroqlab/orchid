@@ -26,7 +26,7 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [Hysteresis (Forward + Backward)](#hysteresis-forward--backward)
   - [Time-Series Monitoring](#time-series-monitoring)
   - [Controller Limits](#controller-limits)
-  - [Controller Bindings](#controller-bindings)
+  - [Virtual Controllers](#virtual-controllers)
   - [Controller Event Logging](#controller-event-logging)
   - [Background Monitoring](#background-monitoring)
   - [Custom Hooks](#custom-hooks)
@@ -332,7 +332,9 @@ bench.add_controller(
 | Non-standard access pattern            | `get_func=..., set_func=...`                |
 | Read-only value                        | `get_func=...` (no `set_func`)              |
 | Computed / derived quantity            | `get_func=..., set_func=...` with logic     |
-| One logical control for multiple channels | `add_controller_binding("name", [...])`  |
+| Cross-capacitance virtual gate (linear) | `add_virtual_controller("name", binding={...})` |
+| Non-linear virtual gate (callable)     | `add_virtual_controller("name", binding=fn)` |
+| Fan-out to multiple channels equally   | `add_controller_binding("name", [...])`     |
 
 #### Readouts
 
@@ -410,10 +412,11 @@ bench.snapshot()
 
 Output:
 ```
-Name      Type    Value    Unit
---------  ------  -------  ------
-Vgt       param   0.4      V
-fac       param   2500.0   Hz
+Name      Type     Value    Unit
+--------  -------  -------  ------
+Vgt       ctrl     0.4      V
+fac       ctrl     2500.0   Hz
+VP1       virtual  —        V
 ```
 
 By default `snapshot()` reads only **controllers** (fast: no instrument queries for readouts). Pass `include_readouts=True` to also acquire readout values — useful for a quick sanity check, but slow if readouts involve VNA sweeps or camera captures:
@@ -434,7 +437,7 @@ bench.snapshot(["Vgt", "lockin_X"])
 
 #### Saving and loading bench configuration
 
-`bench.save()` writes the full bench configuration to a YAML file — instrument class paths, connection args, all controllers and `instrument + attr` readouts, plus source hints for any custom callables. `Bench.load()` reads it back and re-instantiates everything via Python's `importlib` (no `eval`). Entries that cannot be auto-wired (custom `get_func`, failed connections, `__main__` classes) are collected as *stubs* — call `bench.show_stubs()` to review them.
+`bench.save()` writes the full bench configuration to a YAML file — instrument class paths, connection args, all controllers, virtual controllers, and `instrument + attr` readouts, plus source hints for any custom callables. `Bench.load()` reads it back and re-instantiates everything via Python's `importlib` (no `eval`). Virtual controllers with linear bindings round-trip fully; callable bindings become stubs. Entries that cannot be auto-wired (custom `get_func`, callable virtual bindings, failed connections, `__main__` classes) are collected as *stubs* — call `bench.show_stubs()` to review them.
 
 ```python
 bench.save("bench.yaml")          # write once
@@ -1314,23 +1317,90 @@ len(bench.controllers["Vgt"].limit_log)  # how many points were clamped
 
 ---
 
-### Controller Bindings
+### Virtual Controllers
 
-Use `Bench.add_controller_binding()` when one logical control should fan out to several existing physical controllers. Setting the binding applies the same value to every bound controller. Bindings are **set-only** — calling `bench["binding"]` (get) raises `RuntimeError`; read the individual bound controllers directly instead.
+Virtual controllers map one logical gate voltage to one or more physical controllers via a binding function. They are **set-only** — there is no readback path (`bench["VP1"]` raises `RuntimeError`). Physical controllers still enforce their own limits when they receive the dispatched value.
+
+#### Linear binding — cross-capacitance correction
+
+Pass a `dict` mapping each target controller name to a scale factor. `set(v)` calls `target.set(factor * v)` for every entry. This is the standard virtual gate used in quantum dot tuning to compensate cross-capacitance between gates:
 
 ```python
-bench.add_controller("stp", instrument="yoko1", attr="voltage", unit="V")
-bench.add_controller("stm", instrument="yoko2", attr="voltage", unit="V")
+bench.add_controller("P1", instrument="qdac", attr="ch01.dc_constant_V", unit="V")
+bench.add_controller("B1", instrument="qdac", attr="ch02.dc_constant_V", unit="V")
+bench.add_controller("B2", instrument="qdac", attr="ch03.dc_constant_V", unit="V")
 
-bench.add_controller_binding("reservoir_v", ["stp", "stm"])
+# VP1 moves P1 by 1.0× and compensates B1 by -0.3×
+bench.add_virtual_controller("VP1", binding={"P1": 1.0, "B1": -0.3})
 
-bench["reservoir_v"] = -0.25          # fans out to stp and stm
-print(bench["stp"])                   # read individual controllers directly
+bench["VP1"] = 1.0
+# → P1.set(1.0),  B1.set(-0.3)
 ```
 
-Bindings are regular `Controller` objects, so they can be used in `Sweep` or `MultiSweep`. Bound physical controllers still enforce their own limits when they receive the value.
+Add limits on the virtual value itself (checked before dispatch):
 
-`add_controller_binding()` raises `KeyError` if any bound name is missing and `ValueError` if the bound-controller list is empty.
+```python
+bench.add_virtual_controller("VP1",
+    binding={"P1": 1.0, "B1": -0.3},
+    limits=(-1.0, 0.5),
+    unit="V",
+)
+```
+
+Virtual controllers can be used directly in `Sweep` and `MultiSweep` — the binding dispatches at every sweep point:
+
+```python
+proc = Procedure(
+    sweeps=[Sweep("VP1", np.linspace(-0.8, 0.0, 51))],
+    ...
+)
+```
+
+Virtual-to-virtual chaining is supported — a virtual controller can target another virtual controller. Cycles are detected at registration time and raise `ValueError`.
+
+#### Callable binding — non-linear mapping
+
+Pass a function `f(v) -> dict[str, float]` for arbitrary mappings:
+
+```python
+bench.add_virtual_controller(
+    "VB",
+    binding=lambda v: {"B1": v, "B2": v + 0.05 * v**2},
+)
+
+bench["VB"] = 2.0
+# → B1.set(2.0),  B2.set(2.1)
+```
+
+#### Fan-out at equal weight
+
+`add_controller_binding` is a convenience wrapper for the common case where all bound controllers receive the same value (weight = 1.0):
+
+```python
+bench.add_controller_binding("reservoir", ["stp", "stm"])
+bench["reservoir"] = -0.25   # → stp.set(-0.25), stm.set(-0.25)
+```
+
+#### Serialization
+
+| Binding type  | `bench.save()` | `Bench.load()` |
+|---------------|----------------|----------------|
+| Linear (`dict`) | ✅ fully serialized | ✅ auto-restored |
+| Callable (`fn`) | ⚠️ source recorded as text | ❌ becomes stub |
+
+Linear virtual controllers in the saved YAML look like:
+
+```yaml
+controllers:
+  VP1:
+    virtual: true
+    binding: {P1: 1.0, B1: -0.3}
+    unit: V
+    limits: [-1.0, 0.5]
+    limit_policy: warn
+```
+
+`Bench.load()` always loads physical controllers before virtual ones, so binding order in the YAML file does not matter even for chained virtuals.
 
 ---
 

@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .instrument import InstrumentAdapter
-from .controller import DataKind, Controller, LimitPolicy, Readout
+from .controller import (
+    DataKind, Controller, ControllerBase, PhysicalController, VirtualController,
+    LimitPolicy, Readout,
+)
 
 
 def _func_source(func) -> str | None:
@@ -52,7 +55,7 @@ class Bench:
     metadata: dict = field(default_factory=dict)
 
     instruments: dict[str, InstrumentAdapter] = field(default_factory=dict, init=False)
-    controllers: dict[str, Controller] = field(default_factory=dict, init=False)
+    controllers: dict[str, ControllerBase] = field(default_factory=dict, init=False)
     readouts: dict[str, Readout] = field(default_factory=dict, init=False)
 
     # Stubs — entries skipped during Bench.load() that need manual re-registration
@@ -150,7 +153,7 @@ class Bench:
         """
         if isinstance(instrument, str):
             instrument = self.instruments[instrument]
-        ctrl = Controller(
+        ctrl = PhysicalController(
             name=name,
             instrument=instrument,
             attr=attr,
@@ -162,6 +165,102 @@ class Bench:
         )
         self.controllers[name] = ctrl
 
+    def add_virtual_controller(
+        self,
+        name: str,
+        binding: dict[str, float] | Callable[[float], dict[str, float]],
+        *,
+        unit: str | None = None,
+        limits: tuple[float, float] | None = None,
+        limit_policy: LimitPolicy = LimitPolicy.WARN,
+    ) -> None:
+        """Register a virtual controller that dispatches to physical controllers.
+
+        Two binding modes:
+
+        **Linear** — pass a ``dict`` mapping target controller names to scale
+        factors.  ``bench["VP1"] = v`` calls ``target.set(factor * v)`` for
+        each entry::
+
+            bench.add_virtual_controller("VP1", binding={"P1": 1.0, "B1": -0.3})
+
+        **Callable** — pass a function ``f(v) -> dict[str, float]`` for
+        arbitrary (non-linear) mappings::
+
+            bench.add_virtual_controller(
+                "VB",
+                binding=lambda v: {"B1": v, "B2": v + 0.05 * v**2},
+            )
+
+        Virtual controllers have no readback — ``bench["VP1"]`` raises
+        ``RuntimeError``.  They can appear as sweep controllers in
+        :class:`~orchid.procedure.Sweep` and their limits apply to the
+        *virtual* value before dispatch.
+
+        Parameters
+        ----------
+        name : str
+            Name for the virtual controller.
+        binding : dict[str, float] or callable
+            Linear weights or arbitrary mapping function.
+        unit : str, optional
+            Unit for the virtual controller. If omitted, inferred from
+            bound controllers (linear binding only).
+        limits : tuple[float, float], optional
+            Inclusive bounds applied to the virtual value before dispatch.
+        limit_policy : LimitPolicy
+            How to handle virtual-value limit violations.
+        """
+        if callable(binding):
+            target_names: list[str] = []
+        else:
+            target_names = list(binding.keys())
+            missing = [n for n in target_names if n not in self.controllers]
+            if missing:
+                raise KeyError(
+                    f"add_virtual_controller {name!r}: unknown targets {missing}"
+                )
+            self._check_no_cycle(name, target_names)
+
+        if unit is None and not callable(binding):
+            units = list(dict.fromkeys(
+                self.controllers[n].unit
+                for n in binding
+                if self.controllers[n].unit
+            ))
+            unit = units[0] if len(units) == 1 else (units[0] if units else None)
+
+        self.controllers[name] = VirtualController(
+            name=name,
+            binding=binding,
+            registry=self.controllers,
+            unit=unit,
+            limits=limits,
+            limit_policy=limit_policy,
+        )
+
+    def _check_no_cycle(self, new_name: str, target_names: list[str]) -> None:
+        """Raise ValueError if adding new_name → targets would create a cycle."""
+        def deps(ctrl_name: str) -> list[str]:
+            ctrl = self.controllers.get(ctrl_name)
+            if isinstance(ctrl, VirtualController) and not callable(ctrl._binding):
+                return list(ctrl._binding.keys())
+            return []
+
+        def dfs(node: str, visiting: set[str]) -> None:
+            if node == new_name:
+                raise ValueError(
+                    f"add_virtual_controller {new_name!r}: binding would create a cycle"
+                )
+            if node in visiting:
+                return
+            visiting.add(node)
+            for dep in deps(node):
+                dfs(dep, visiting)
+
+        for target in target_names:
+            dfs(target, set())
+
     def add_controller_binding(
         self,
         name: str,
@@ -170,11 +269,11 @@ class Bench:
         unit: str | None = None,
         limits: tuple[float, float] | None = None,
         limit_policy: LimitPolicy = LimitPolicy.WARN,
-    ):
-        """Register a virtual controller bound to existing controllers.
+    ) -> None:
+        """Register a virtual controller that mirrors multiple controllers at weight 1.
 
-        Setting the virtual controller sets all bound controllers to the same
-        value. Reading it returns a ``{controller_name: value}`` mapping.
+        Sets all bound controllers to the same value. Equivalent to
+        ``add_virtual_controller(name, binding={g: 1.0 for g in gate_names})``.
 
         Parameters
         ----------
@@ -188,31 +287,12 @@ class Bench:
         """
         if not gate_names:
             raise ValueError("add_controller_binding requires at least one controller")
-
-        missing = [gate for gate in gate_names if gate not in self.controllers]
-        if missing:
-            raise KeyError(f"Cannot bind {name!r}: missing controllers {missing}")
-
-        physical = [self.controllers[gate] for gate in gate_names]
-        if unit is None:
-            units = list(dict.fromkeys(ctrl.unit for ctrl in physical if ctrl.unit))
-            unit = (
-                " / ".join(units)
-                if len(units) > 1
-                else (units[0] if units else None)
-            )
-
-        def set_bound(value):
-            for ctrl in physical:
-                ctrl.set(value)
-
-        self.add_controller(
+        self.add_virtual_controller(
             name,
-            get_func=None,
-            set_func=set_bound,
+            binding={g: 1.0 for g in gate_names},
             unit=unit,
             limits=limits,
-            limit_policy=limit_policy
+            limit_policy=limit_policy,
         )
 
     def add_readout(
@@ -398,11 +478,16 @@ class Bench:
         for name in names:
             if name in self.controllers:
                 p = self.controllers[name]
-                try:
-                    val = p.get()
-                except Exception as e:
-                    val = f"ERR: {e}"
-                rows.append([name, "ctrl", val, p.unit or "", p.limits or ""])
+                if isinstance(p, VirtualController):
+                    val = "—"
+                    kind = "virtual"
+                else:
+                    try:
+                        val = p.get()
+                    except Exception as e:
+                        val = f"ERR: {e}"
+                    kind = "ctrl"
+                rows.append([name, kind, val, p.unit or "", p.limits or ""])
             elif name in self.readouts:
                 r = self.readouts[name]
                 try:
@@ -476,9 +561,40 @@ class Bench:
             config["instruments"][iname] = entry
 
         # ── controllers ───────────────────────────────────────────────
+        import warnings as _warnings
         for cname, ctrl in self.controllers.items():
-            if ctrl.instrument is not None and ctrl.attr is not None:
-                # Find the registered name for this adapter
+            lim = list(ctrl.limits) if ctrl.limits is not None else None
+            base_meta: dict = {
+                "unit": ctrl.unit,
+                "limits": lim,
+                "limit_policy": str(ctrl.limit_policy),
+            }
+
+            if isinstance(ctrl, VirtualController):
+                if callable(ctrl._binding):
+                    entry = {
+                        "virtual": True,
+                        "binding": None,
+                        **base_meta,
+                        "_note": "Callable binding — re-register manually after load.",
+                    }
+                    src = _func_source(ctrl._binding)
+                    if src is not None:
+                        entry["binding_src"] = src
+                    _warnings.warn(
+                        f"Bench.save: virtual controller {cname!r} has a callable "
+                        "binding that cannot be serialized. A stub will be saved.",
+                        stacklevel=2,
+                    )
+                else:
+                    entry = {
+                        "virtual": True,
+                        "binding": dict(ctrl._binding),
+                        **base_meta,
+                    }
+                config["controllers"][cname] = entry
+
+            elif ctrl.instrument is not None and ctrl.attr is not None:
                 instr_name = next(
                     (n for n, a in self.instruments.items() if a is ctrl.instrument),
                     None,
@@ -486,17 +602,13 @@ class Bench:
                 config["controllers"][cname] = {
                     "instrument": instr_name,
                     "attr": ctrl.attr,
-                    "unit": ctrl.unit,
-                    "limits": list(ctrl.limits) if ctrl.limits is not None else None,
-                    "limit_policy": str(ctrl.limit_policy),
+                    **base_meta,
                 }
             else:
-                entry: dict = {
+                entry = {
                     "instrument": None,
                     "attr": None,
-                    "unit": ctrl.unit,
-                    "limits": list(ctrl.limits) if ctrl.limits is not None else None,
-                    "limit_policy": str(ctrl.limit_policy),
+                    **base_meta,
                     "_note": "Custom get_func/set_func — re-register manually after load.",
                 }
                 src_get = _func_source(ctrl.get_func)
@@ -613,7 +725,12 @@ class Bench:
                 failed_instruments.add(iname)
 
         # ── controllers ───────────────────────────────────────────────
-        for cname, ccfg in config.get("controllers", {}).items():
+        all_ctrl_cfgs = config.get("controllers", {})
+        physical_cfgs = {n: c for n, c in all_ctrl_cfgs.items() if not c.get("virtual")}
+        virtual_cfgs  = {n: c for n, c in all_ctrl_cfgs.items() if c.get("virtual")}
+
+        # Physical controllers first
+        for cname, ccfg in physical_cfgs.items():
             instr_name = ccfg.get("instrument")
             attr = ccfg.get("attr")
             raw_limits = ccfg.get("limits")
@@ -646,6 +763,67 @@ class Bench:
                 limits=tuple(raw_limits) if raw_limits is not None else None,
                 limit_policy=LimitPolicy(ccfg.get("limit_policy", "warn")),
             )
+
+        # Virtual controllers second — dependency-ordered so chains load correctly.
+        # Repeat passes until all are resolved or no progress is made.
+        pending = dict(virtual_cfgs)
+        while pending:
+            progress = False
+            for cname, ccfg in list(pending.items()):
+                binding = ccfg.get("binding")
+                raw_limits = ccfg.get("limits")
+
+                if binding is None:
+                    # Callable binding — cannot restore, becomes a stub
+                    bench._stubs[cname] = {
+                        "kind": "controller",
+                        "reason": "callable virtual binding — re-register manually",
+                        "unit": ccfg.get("unit"),
+                        "limits": raw_limits,
+                        "limit_policy": ccfg.get("limit_policy", "warn"),
+                        "binding_src": ccfg.get("binding_src"),
+                    }
+                    del pending[cname]
+                    progress = True
+                    continue
+
+                # Check all targets are already registered
+                missing = [t for t in binding if t not in bench.controllers]
+                if missing:
+                    continue  # retry after other virtuals load
+
+                try:
+                    bench.add_virtual_controller(
+                        cname,
+                        binding={k: float(v) for k, v in binding.items()},
+                        unit=ccfg.get("unit"),
+                        limits=tuple(raw_limits) if raw_limits is not None else None,
+                        limit_policy=LimitPolicy(ccfg.get("limit_policy", "warn")),
+                    )
+                except Exception as exc:
+                    bench._stubs[cname] = {
+                        "kind": "controller",
+                        "reason": f"virtual load failed: {exc}",
+                        "unit": ccfg.get("unit"),
+                        "limits": raw_limits,
+                        "binding": binding,
+                    }
+                del pending[cname]
+                progress = True
+
+            if not progress:
+                # Remaining entries have unresolvable targets
+                for cname, ccfg in pending.items():
+                    missing = [t for t in (ccfg.get("binding") or {})
+                               if t not in bench.controllers]
+                    bench._stubs[cname] = {
+                        "kind": "controller",
+                        "reason": f"virtual targets not available: {missing}",
+                        "unit": ccfg.get("unit"),
+                        "limits": ccfg.get("limits"),
+                        "binding": ccfg.get("binding"),
+                    }
+                break
 
         # ── readouts ──────────────────────────────────────────────────
         for rname, rcfg in config.get("readouts", {}).items():
