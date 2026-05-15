@@ -3,7 +3,7 @@
 from .instrument import InstrumentAdapter
 from .controller import (
     DataKind, Controller, ControllerBase, PhysicalController, VirtualController,
-    LimitPolicy, LimitEntry, Readout,
+    LimitPolicy, LimitEntry, Readout, PhysicalReadout, VirtualReadout,
 )
 from .bench import Bench
 from .procedure import ErrorPolicy, MonitorProcedure, MultiSweep, Procedure, Sweep, WriteMode
@@ -22,6 +22,8 @@ __all__ = [
     "LimitPolicy",
     "LimitEntry",
     "Readout",
+    "PhysicalReadout",
+    "VirtualReadout",
     "Bench",
     "ErrorPolicy",
     "MonitorProcedure",

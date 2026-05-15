@@ -373,6 +373,43 @@ bench.add_readout("camera", kind="image", shape=(480, 640),
 
 For `IMAGE` readouts, passing `contains` as a `list[str]` (one name per column) lets the `LivePlotter` select a column by name via `z_col` — see [Trace heatmap (VNA)](#trace-heatmap-vna) below.
 
+#### Virtual Readouts
+
+A **VirtualReadout** computes a derived quantity from already-measured physical readouts. The runner always measures physicals first, then calls each virtual's `transform` with the data dict. This keeps fits, unit conversions, or any combined channel in the same zarr dataset as the raw data.
+
+```python
+# Physical readout — the raw VNA sweep
+bench.add_readout("S21", kind="image", shape=(3, 1601),
+    get_func=vna.get_trace, contains=["f", "mag", "phase"])
+
+# Virtual readout — fit resonance frequency from the raw trace
+def fit_resonance(data):
+    f, mag = data["S21"][0], data["S21"][1]
+    return float(f[np.argmin(mag)])   # resonance frequency in Hz
+
+bench.add_virtual_readout(
+    "res_freq",
+    sources=["S21"],          # must be a PhysicalReadout
+    transform=fit_resonance,
+    kind=DataKind.SCALAR,
+    unit="Hz",
+)
+
+# Both readouts must be listed in proc.readouts
+proc = Procedure(
+    name="resonance_vs_gate",
+    bench=bench,
+    sweeps=[Sweep("Vgt", np.linspace(-1, 1, 50))],
+    readouts=["S21", "res_freq"],   # S21 listed first so it's measured before fit
+)
+```
+
+**Rules:**
+- `sources` must be `PhysicalReadout` entries on the bench (no virtual-to-virtual).
+- All sources must be in `proc.readouts`; the runner raises `ValueError` otherwise.
+- Compute errors follow `proc.error_policy` (STOP_AND_SAVE / RETRY_AND_SKIP / IGNORE) but no retries are attempted.
+- `transform` cannot be serialized by `bench.save()` — a stub is written with the source text as a hint.
+
 ---
 
 ### Step 3: Bench
@@ -2005,13 +2042,13 @@ Each violation is stored as a `LimitEntry(index, requested, clamped)` named tupl
 
 ---
 
-### Readout
+### PhysicalReadout
 
 ```python
-from orchid import Readout
+from orchid import PhysicalReadout  # also importable as Readout
 ```
 
-A read-only measurement channel. Supply either `get_func` **or** `instrument + attr`; the latter is fully serializable by `bench.save()` / `Bench.load()`.
+A read-only measurement channel backed by a real instrument. Supply either `get_func` **or** `instrument + attr`; the latter is fully serializable by `bench.save()` / `Bench.load()`.
 
 | Argument     | Type                          | Default  | Description                            |
 |--------------|-------------------------------|----------|----------------------------------------|
@@ -2024,10 +2061,80 @@ A read-only measurement channel. Supply either `get_func` **or** `instrument + a
 | `unit`       | `str` or `None`               | `None`   | Physical unit                          |
 | `contains`   | `str`, `list[str]`, or `None` | `None`   | For `IMAGE` readouts: list of column names (e.g. `["f", "mag", "phase"]`) enabling `z_col` string lookup in `PlotSpec`. For other kinds: plain string description. |
 
-| Method                         | Description           |
-|--------------------------------|-----------------------|
-| `read() -> ndarray or float`   | Acquire measurement   |
-| `await aread() -> ndarray or float` | Async acquire    |
+| Method                              | Description            |
+|-------------------------------------|------------------------|
+| `read() -> ndarray or float`        | Acquire measurement    |
+| `await aread() -> ndarray or float` | Async acquire          |
+
+`Readout` is a backward-compatible alias for `PhysicalReadout`.
+
+---
+
+### VirtualReadout
+
+```python
+from orchid import VirtualReadout
+```
+
+A derived measurement channel computed from already-measured physical readout data. The runner measures all `PhysicalReadout` entries first, then calls each `VirtualReadout`'s `transform` with the measured data as a dict. This keeps derived quantities (fits, unit conversions, combined channels) in the same dataset as the raw data that produced them.
+
+**Constraints:**
+- All `sources` must be `PhysicalReadout` entries registered on the bench (no virtual-to-virtual chaining).
+- Every source must also appear in `proc.readouts` — the runner validates this at run time and raises `ValueError` if any source is missing. This ensures the user explicitly controls what is recorded.
+- `VirtualReadout` has no `read()` method. Use `compute(data)` / `acompute(data)`.
+
+| Argument    | Type                          | Default    | Description                                   |
+|-------------|-------------------------------|------------|-----------------------------------------------|
+| `name`      | `str`                         | required   | Label (e.g. `"res_freq"`)                     |
+| `kind`      | `DataKind`                    | required   | `SCALAR`, `TRACE`, or `IMAGE`                 |
+| `sources`   | `list[str]`                   | required   | Physical readout names whose data is passed to `transform` |
+| `transform` | `callable`                    | required   | `f(data: dict) -> Any`. May be a coroutine.   |
+| `shape`     | `tuple` or `None`             | `None`     | Required for `TRACE` and `IMAGE` output        |
+| `unit`      | `str` or `None`               | `None`     | Physical unit of the computed result           |
+| `contains`  | `str`, `list[str]`, or `None` | `None`     | Description of computed quantity               |
+
+| Method                                    | Description                       |
+|-------------------------------------------|-----------------------------------|
+| `compute(data: dict) -> Any`              | Compute from a dict of source data |
+| `await acompute(data: dict) -> Any`       | Async compute                     |
+
+**Example — fit resonance frequency from VNA trace:**
+
+```python
+bench.add_readout("S21", kind=DataKind.IMAGE, shape=(3, 1601),
+    get_func=vna.get_trace, contains=["f", "mag", "phase"])
+
+def fit_resonance(data):
+    f   = data["S21"][0]   # frequency axis
+    mag = data["S21"][1]   # transmission magnitude
+    idx = np.argmin(mag)
+    # crude linewidth estimate from 3dB points
+    dip = mag[idx]
+    half = np.where(mag < dip + 3)[0]
+    linewidth = f[half[-1]] - f[half[0]] if len(half) > 1 else np.nan
+    return np.array([f[idx], linewidth])  # (freq, linewidth)
+
+bench.add_virtual_readout(
+    "res_fit",
+    sources=["S21"],
+    transform=fit_resonance,
+    kind=DataKind.TRACE,
+    shape=(2,),
+    unit="Hz",
+    contains=["resonance_freq", "linewidth"],
+)
+```
+
+Then include both in the procedure readouts so the fit is saved alongside the raw trace:
+
+```python
+proc = Procedure(
+    name="vna_resonance",
+    bench=bench,
+    sweeps=[Sweep("Vgt", np.linspace(-1, 1, 50))],
+    readouts=["S21", "res_fit"],   # S21 must be listed so the virtual can use it
+)
+```
 
 ---
 
@@ -2062,7 +2169,7 @@ Central container for the entire lab bench configuration.
 |----------------|----------------------------------|------------------------|
 | `instruments`  | `dict[str, InstrumentAdapter]`   | Registered instruments |
 | `controllers`  | `dict[str, Controller]`          | Registered controllers |
-| `readouts`     | `dict[str, Readout]`             | Registered readouts    |
+| `readouts`     | `dict[str, PhysicalReadout \| VirtualReadout]` | Registered readouts |
 | `data_root`    | `Path`                           | Data output root       |
 | `metadata`     | `dict`                           | User metadata          |
 
@@ -2076,13 +2183,17 @@ Register an instrument. `backend` can be `"auto"`, `"pymeasure"`, `"qcodes"`, or
 
 Register a control parameter. `instrument` can be an `InstrumentAdapter` object or the string name of a registered instrument. `limits` is an optional inclusive `(lo, hi)` range and `limit_policy` controls clamp, raise, or log behavior.
 
-**`add_controller_binding(name, gate_names, *, unit=None) -> Controller`**
+**`add_controller_binding(name, gate_names, *, unit=None) -> None`**
 
-Register a **set-only** virtual controller that fans out to all controllers named in `gate_names`. Setting the binding applies the same value to every bound controller. Getting it raises `RuntimeError` — read individual bound controllers directly. If `unit` is omitted, it is inferred from bound controllers.
+Register a virtual controller that fans out to all controllers in `gate_names` with weight 1.0 — equivalent to `add_virtual_controller(name, binding={g: 1.0 for g in gate_names})`. No readback — read individual bound controllers via `bench.controllers["name"].get()`. If `unit` is omitted it is inferred from bound controllers.
 
-**`add_readout(name, kind, get_func=None, instrument=None, attr=None, shape=None, unit=None, contains=None) -> Readout`**
+**`add_readout(name, kind, get_func=None, instrument=None, attr=None, shape=None, unit=None, contains=None) -> PhysicalReadout`**
 
-Register a measurement readout. `kind` can be a `DataKind` enum or string (`"scalar"`, `"trace"`, `"image"`). Supply either `get_func` **or** `instrument + attr` (the latter is fully serializable by `bench.save()` / `Bench.load()`). `instrument` can be an `InstrumentAdapter` object or the string name of a registered instrument. For `IMAGE` readouts, pass `contains` as a `list[str]` of column names to enable named `z_col` selection in `PlotSpec`.
+Register a physical measurement readout. `kind` can be a `DataKind` enum or string (`"scalar"`, `"trace"`, `"image"`). Supply either `get_func` **or** `instrument + attr` (the latter is fully serializable by `bench.save()` / `Bench.load()`). `instrument` can be an `InstrumentAdapter` object or the string name of a registered instrument. For `IMAGE` readouts, pass `contains` as a `list[str]` of column names to enable named `z_col` selection in `PlotSpec`.
+
+**`add_virtual_readout(name, sources, transform, *, kind=DataKind.SCALAR, shape=None, unit=None, contains=None) -> VirtualReadout`**
+
+Register a derived readout computed from physical readout data. `sources` is a list of physical readout names whose measured data is passed to `transform` as a dict. `transform` must be `f(data: dict) -> Any` (coroutine functions are supported). All sources must be `PhysicalReadout` entries — virtual-to-virtual chaining is not supported. When used in a procedure, every source must also appear in `proc.readouts`; the runner validates this at setup time. The transform cannot be serialized by `bench.save()` — a stub is written and a warning is emitted.
 
 **`remove_instrument(name) -> None`**
 

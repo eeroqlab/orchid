@@ -12,7 +12,7 @@ from typing import Any, Callable
 from .instrument import InstrumentAdapter
 from .controller import (
     DataKind, Controller, ControllerBase, PhysicalController, VirtualController,
-    LimitPolicy, Readout,
+    LimitPolicy, Readout, PhysicalReadout, VirtualReadout,
 )
 
 
@@ -56,7 +56,7 @@ class Bench:
 
     instruments: dict[str, InstrumentAdapter] = field(default_factory=dict, init=False)
     controllers: dict[str, ControllerBase] = field(default_factory=dict, init=False)
-    readouts: dict[str, Readout] = field(default_factory=dict, init=False)
+    readouts: dict[str, PhysicalReadout | VirtualReadout] = field(default_factory=dict, init=False)
 
     # Stubs — entries skipped during Bench.load() that need manual re-registration
     # Each value: {"kind": "controller"|"readout", "unit", "limits",
@@ -347,6 +347,93 @@ class Bench:
         )
         self.readouts[name] = readout
 
+    def add_virtual_readout(
+        self,
+        name: str,
+        sources: list[str],
+        transform: Callable,
+        *,
+        kind: DataKind | str = DataKind.SCALAR,
+        shape: tuple[int, ...] | None = None,
+        unit: str | None = None,
+        contains: str | list[str] | None = None,
+    ) -> VirtualReadout:
+        """Register a derived readout computed from physical readout data.
+
+        The runner measures all physical readouts first, then calls each
+        virtual readout's ``transform`` with the measured data as a dict.
+        This keeps derived quantities (fits, unit conversions, etc.) in the
+        same dataset as the raw data that produced them.
+
+        All ``sources`` must be :class:`PhysicalReadout` entries registered
+        on this bench — virtual-to-virtual chaining is not supported.  When
+        used in a procedure, every source must also be listed in
+        ``proc.readouts``; the runner validates this at setup time.
+
+        Parameters
+        ----------
+        name : str
+            Label for the derived readout.
+        sources : list of str
+            Names of physical readouts whose data is passed to ``transform``.
+        transform : callable
+            ``f(data: dict) -> Any``.  The dict contains ``{source: value}``
+            for each listed source.  May be a coroutine function.
+        kind : DataKind or str
+            "scalar", "trace", or "image".
+        shape : tuple, optional
+            Trailing shape for trace/image outputs. Required for non-scalar.
+        unit : str, optional
+            Physical unit of the computed result.
+        contains : str or list of str, optional
+            Description of the computed quantity.
+
+        Returns
+        -------
+        VirtualReadout
+            The registered readout object.
+
+        Examples
+        --------
+        ::
+
+            def fit_dip(data):
+                mag = data["S21"][1]   # mag row from IMAGE readout
+                return float(np.min(mag))
+
+            bench.add_virtual_readout(
+                "res_depth",
+                sources=["S21"],
+                transform=fit_dip,
+                kind=DataKind.SCALAR,
+                unit="dB",
+            )
+        """
+        if isinstance(kind, str):
+            kind = DataKind(kind)
+        missing = [s for s in sources if s not in self.readouts]
+        if missing:
+            raise KeyError(
+                f"add_virtual_readout {name!r}: source readouts not in bench: {missing}"
+            )
+        non_physical = [s for s in sources if isinstance(self.readouts[s], VirtualReadout)]
+        if non_physical:
+            raise ValueError(
+                f"add_virtual_readout {name!r}: sources must be PhysicalReadouts, "
+                f"virtual-to-virtual chaining is not supported: {non_physical}"
+            )
+        vrd = VirtualReadout(
+            name=name,
+            kind=kind,
+            sources=sources,
+            transform=transform,
+            shape=shape,
+            unit=unit,
+            contains=contains,
+        )
+        self.readouts[name] = vrd
+        return vrd
+
     def remove_instrument(self, name: str) -> None:
         """Remove an instrument and all parameters/readouts that depend on it.
 
@@ -403,7 +490,13 @@ class Bench:
         if name in self.controllers:
             return self.controllers[name].get()
         if name in self.readouts:
-            return self.readouts[name].read()
+            rd = self.readouts[name]
+            if isinstance(rd, VirtualReadout):
+                raise RuntimeError(
+                    f"Readout {name!r} is a VirtualReadout — use compute(data) "
+                    "with measured source data, not bench[name]"
+                )
+            return rd.read()
         raise KeyError(f"No controller or readout named {name!r}")
 
     def __setitem__(self, name: str, value) -> None:
@@ -490,16 +583,19 @@ class Bench:
                 rows.append([name, kind, val, p.unit or "", p.limits or ""])
             elif name in self.readouts:
                 r = self.readouts[name]
-                try:
-                    val = r.read()
-                except Exception as e:
-                    val = f"ERR: {e}"
-                # Compact display for large array readouts
-                if r.kind.value == "trace" and not isinstance(val, str):
-                    val = "[...]"
-                elif r.kind.value == "image" and not isinstance(val, str):
-                    val = "[[...]]"
-                rows.append([name, f"read / {r.kind.value}", val, r.unit or "", "N/A"])
+                if isinstance(r, VirtualReadout):
+                    rows.append([name, f"virtual / {r.kind.value}", "—", r.unit or "", f"sources={r.sources}"])
+                else:
+                    try:
+                        val = r.read()
+                    except Exception as e:
+                        val = f"ERR: {e}"
+                    # Compact display for large array readouts
+                    if r.kind.value == "trace" and not isinstance(val, str):
+                        val = "[...]"
+                    elif r.kind.value == "image" and not isinstance(val, str):
+                        val = "[[...]]"
+                    rows.append([name, f"read / {r.kind.value}", val, r.unit or "", "N/A"])
             else:
                 rows.append([name, "?", "NOT FOUND", ""])
 
@@ -620,6 +716,7 @@ class Bench:
                 config["controllers"][cname] = entry
 
         # ── readouts ──────────────────────────────────────────────────
+        import warnings as _ro_warnings
         for rname, ro in self.readouts.items():
             base: dict = {
                 "kind": str(ro.kind),
@@ -627,7 +724,23 @@ class Bench:
                 "unit": ro.unit,
                 "contains": ro.contains,
             }
-            if ro.instrument is not None and ro.attr is not None:
+            if isinstance(ro, VirtualReadout):
+                vro_entry: dict = {
+                    **base,
+                    "virtual": True,
+                    "sources": list(ro.sources),
+                    "_note": "Virtual readout — transform cannot be serialized. Re-register manually after load.",
+                }
+                src_transform = _func_source(ro.transform)
+                if src_transform is not None:
+                    vro_entry["transform_src"] = src_transform
+                config["readouts"][rname] = vro_entry
+                _ro_warnings.warn(
+                    f"Bench.save: virtual readout {rname!r} transform cannot be serialized. "
+                    "A stub will be saved.",
+                    stacklevel=2,
+                )
+            elif ro.instrument is not None and ro.attr is not None:
                 instr_name = next(
                     (n for n, a in self.instruments.items() if a is ro.instrument),
                     None,
@@ -827,6 +940,18 @@ class Bench:
 
         # ── readouts ──────────────────────────────────────────────────
         for rname, rcfg in config.get("readouts", {}).items():
+            if rcfg.get("virtual"):
+                bench._stubs[rname] = {
+                    "kind": "readout",
+                    "reason": "virtual readout — transform not serializable, re-register manually",
+                    "readout_kind": rcfg.get("kind", "scalar"),
+                    "unit": rcfg.get("unit"),
+                    "shape": rcfg.get("shape"),
+                    "sources": rcfg.get("sources", []),
+                    "transform_src": rcfg.get("transform_src"),
+                }
+                continue
+
             instr_name = rcfg.get("instrument")
             attr = rcfg.get("attr")
 

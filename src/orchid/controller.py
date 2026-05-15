@@ -360,8 +360,8 @@ Controller = PhysicalController
 # ══════════════════════════════════════════════════════════════════════
 
 @dataclass
-class Readout:
-    """A read-only measurement channel (e.g. VNA trace, lockin reading).
+class PhysicalReadout:
+    """A read-only measurement channel backed by a real instrument.
 
     Supply either ``get_func`` **or** ``instrument + attr``; the latter is
     fully serializable by :py:meth:`Bench.save` / :py:meth:`Bench.load`.
@@ -429,4 +429,92 @@ class Readout:
 
     def __repr__(self) -> str:
         src = self.attr if self.attr else "callable"
-        return f"Readout({self.name!r}, {self.kind}, src={src!r}, shape={self.shape})"
+        return f"PhysicalReadout({self.name!r}, {self.kind}, src={src!r}, shape={self.shape})"
+
+
+@dataclass
+class VirtualReadout:
+    """A derived measurement channel computed from physical readout data.
+
+    VirtualReadout has no hardware connection — it calls ``transform`` on a
+    subset of already-measured data.  This is useful for fitting, unit
+    conversion, or any derived quantity (e.g. extracting resonance frequency
+    from a VNA trace).
+
+    The runner always measures physical readouts first, then computes virtuals
+    in the order they appear in ``proc.readouts``.  All ``sources`` must be
+    listed explicitly in ``proc.readouts``; the runner raises ``ValueError``
+    otherwise so the user has full control over what is recorded.
+
+    No ``read()`` or ``aread()`` — use ``compute(data)`` / ``acompute(data)``.
+
+    Parameters
+    ----------
+    name : str
+        Label, e.g. "resonance_freq".
+    kind : DataKind
+        SCALAR, TRACE, or IMAGE.
+    sources : list of str
+        Names of physical readouts whose data is passed to ``transform``.
+        Must be :class:`PhysicalReadout` entries (no virtual-to-virtual).
+    transform : callable
+        ``f(data: dict) -> Any`` where the dict contains ``{source: value}``
+        for each source name.  May be a coroutine function.
+    shape : tuple, optional
+        Trailing shape for TRACE/IMAGE output. Required for non-scalar.
+    unit : str, optional
+        Physical unit of the computed result.
+    contains : str or list of str, optional
+        Description of computed quantity.
+
+    Examples
+    --------
+    Extract resonance frequency and linewidth from a VNA trace::
+
+        def fit_resonance(data):
+            f, mag = data["f_axis"], data["S21"]
+            idx = np.argmin(mag)
+            return np.array([f[idx], 0.1e6])  # freq, linewidth
+
+        bench.add_virtual_readout(
+            "res_fit",
+            sources=["S21"],
+            transform=fit_resonance,
+            kind=DataKind.TRACE,
+            shape=(2,),
+            unit="Hz",
+        )
+    """
+
+    name: str
+    kind: DataKind
+    sources: list[str]
+    transform: Callable[[dict], Any]
+    shape: tuple[int, ...] | None = None
+    unit: str | None = None
+    contains: str | list[str] | None = None
+
+    def __post_init__(self):
+        if self.kind != DataKind.SCALAR and self.shape is None:
+            raise ValueError(
+                f"VirtualReadout {self.name!r}: shape is required for {self.kind} kind"
+            )
+
+    def compute(self, data: dict) -> Any:
+        """Compute the virtual readout from a dict of source data."""
+        subset = {src: data[src] for src in self.sources}
+        return self.transform(subset)
+
+    async def acompute(self, data: dict) -> Any:
+        """Compute the virtual readout asynchronously."""
+        if inspect.iscoroutinefunction(self.transform):
+            subset = {src: data[src] for src in self.sources}
+            return await self.transform(subset)
+        return await asyncio.to_thread(self.compute, data)
+
+    def __repr__(self) -> str:
+        return f"VirtualReadout({self.name!r}, {self.kind}, sources={self.sources})"
+
+
+# Backward-compatible alias
+Readout = PhysicalReadout
