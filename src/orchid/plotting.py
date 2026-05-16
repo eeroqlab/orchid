@@ -282,6 +282,18 @@ def _format_elapsed_display(elapsed_s: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+def _format_eta(seconds: float) -> str:
+    """Format a duration as ``MM m SS s`` / ``H h MM m`` / ``SS s``."""
+    if seconds < 60:
+        return f"{int(seconds)} s"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    if h > 0:
+        return f"{h} h {m:02d} m"
+    return f"{m:02d} m {s:02d} s"
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  PlotterBase — all data logic, no server code
 # ══════════════════════════════════════════════════════════════════════
@@ -1064,28 +1076,73 @@ def _lp_rail_children(plotter) -> list:
     if sweeps:
         kv_rows = []
         sv = plotter._last_sweep_values
-        for sweep in sweeps:
-            if hasattr(sweep, "controllers"):
-                ctrls = sweep.controllers
+        n_axes = len(sweeps)
+
+        for ax_idx, sweep in enumerate(sweeps):
+            is_innermost = (ax_idx == n_axes - 1)
+            # Gather per-controller value arrays
+            if hasattr(sweep, "all_values"):  # MultiSweep
+                ctrl_arrays = list(zip(sweep.controllers, sweep.all_values))
             else:
-                ctrls = [sweep.controller]
-            for ctrl in ctrls:
-                val = sv.get(ctrl.name)
-                if val is None:
-                    val_str = "—"
-                elif isinstance(val, float):
-                    val_str = f"{val:.4g}"
-                else:
-                    val_str = str(val)
+                ctrl_arrays = [(sweep.controller, sweep.values)]
+
+            for ctrl, arr in ctrl_arrays:
                 unit = getattr(ctrl, "unit", None) or ""
-                display = f"{val_str} {unit}".strip() if unit else val_str
+                mn, mx = float(arr.min()), float(arr.max())
+                n_pts = len(arr)
+
+                def _fmt(v):
+                    return f"{v:.4g} {unit}".strip() if unit else f"{v:.4g}"
+
+                # Range row
                 kv_rows.append(html.Div([
-                    html.Span(ctrl.name, className="lp-kv-k"),
-                    html.Span(display, className="lp-kv-v"),
+                    html.Span(f"{ctrl.name} Range", className="lp-kv-k"),
+                    html.Span(f"{mn:.4g} → {mx:.4g}{' ' + unit if unit else ''}",
+                              className="lp-kv-v"),
                 ], className="lp-kv"))
+
+                # Step row (only when > 1 point)
+                if n_pts > 1:
+                    step = (mx - mn) / (n_pts - 1)
+                    kv_rows.append(html.Div([
+                        html.Span(f"{ctrl.name} Step", className="lp-kv-k"),
+                        html.Span(_fmt(step), className="lp-kv-v"),
+                    ], className="lp-kv"))
+
+                # Now row — accent on innermost (fastest-changing) axis
+                val = sv.get(ctrl.name)
+                val_str = "—" if val is None else _fmt(float(val))
+                now_cls = "lp-kv-v lp-accent" if is_innermost else "lp-kv-v"
+                kv_rows.append(html.Div([
+                    html.Span(f"{ctrl.name} Now", className="lp-kv-k"),
+                    html.Span(val_str, className=now_cls),
+                ], className="lp-kv"))
+
+        # Points row  (e.g. "56 × 40")
+        pts_str = " × ".join(str(s.length) for s in sweeps)
+        kv_rows.append(html.Div([
+            html.Span("Points", className="lp-kv-k"),
+            html.Span(pts_str, className="lp-kv-v"),
+        ], className="lp-kv"))
+
+        # ETA row
+        settle = getattr(proc, "settle_time", 0.0) or 0.0
+        if settle > 0:
+            total_pts = 1
+            for s in sweeps:
+                total_pts *= s.length
+            eta_str = _format_eta(total_pts * settle)
+            kv_rows.append(html.Div([
+                html.Span("ETA", className="lp-kv-k"),
+                html.Span(eta_str, className="lp-kv-v"),
+            ], className="lp-kv"))
+
         children.append(html.Div([
-            html.Div(html.Span("Sweep", className="lp-group-title"),
-                     className="lp-group-head"),
+            html.Div([
+                html.Span("Sweep", className="lp-group-title"),
+                html.Span(f"{n_axes} {'axis' if n_axes == 1 else 'axes'}",
+                          className="lp-group-right"),
+            ], className="lp-group-head"),
             *kv_rows,
         ]))
 
@@ -1376,13 +1433,18 @@ class DashPlotter(PlotterBase):
     # ── Theme ──────────────────────────────────────────────────────────
 
     def _theme_layout(self, fig) -> None:
-        """Apply the current colour theme to the freshly built figure."""
+        """Apply the current colour theme to the freshly built figure.
+
+        Also sets ``autosize=True`` so the figure fills its CSS container
+        (the `.lp-panel` flex cell) rather than using the fixed
+        ``height_per_plot * n`` value set in ``build_figure_dict``.
+        """
         from .themes import THEMES, plotly_template
         theme = THEMES.get(self._current_theme, THEMES["orchid"])
         tpl = plotly_template(theme)
         axis_style = {k: v for k, v in tpl.pop("xaxis", {}).items() if k != "title"}
         y_axis_style = {k: v for k, v in tpl.pop("yaxis", {}).items() if k != "title"}
-        fig.update_layout(**tpl)
+        fig.update_layout(autosize=True, **tpl)
         if axis_style:
             fig.update_xaxes(**axis_style)
         if y_axis_style:
@@ -1400,6 +1462,7 @@ class DashPlotter(PlotterBase):
         y_axis_style = {k: v for k, v in tpl.pop("yaxis", {}).items() if k != "title"}
         layout = self._fig_dict["layout"]
         layout.update(tpl)
+        layout["autosize"] = True
         for key in list(layout.keys()):
             if key.startswith("xaxis") and isinstance(layout[key], dict):
                 _deep_merge(layout[key], axis_style)
