@@ -14,16 +14,12 @@ authors = [
 dependencies = [
     "numpy",
     "tqdm",
-    "nest_asyncio",
     "plotly>=5.0",
     "dash>=2.0",
-    "zarro"
+    "qcodes",
+    "pymeasure",
+    "zarro @ git+https://github.com/eeroqlab/zarro.git",
 ]
-
-[project.optional-dependencies]
-plot = ["plotly>=5.0", "dash>=2.0"]
-qcodes = ["qcodes"]
-pymeasure = ["pymeasure"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
