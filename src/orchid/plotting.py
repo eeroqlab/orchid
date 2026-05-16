@@ -1110,8 +1110,14 @@ def _lp_rail_children(plotter) -> list:
                     ], className="lp-kv"))
 
                 # Now row — accent on innermost (fastest-changing) axis
+                # sweep_values may be an array (full inner sweep in SWEEPWISE mode);
+                # take the last element which is the most recently set value.
                 val = sv.get(ctrl.name)
-                val_str = "—" if val is None else _fmt(float(val))
+                if val is None:
+                    val_str = "—"
+                else:
+                    v = np.asarray(val)
+                    val_str = _fmt(float(v.flat[-1]))
                 now_cls = "lp-kv-v lp-accent" if is_innermost else "lp-kv-v"
                 kv_rows.append(html.Div([
                     html.Span(f"{ctrl.name} Now", className="lp-kv-k"),
@@ -1444,7 +1450,9 @@ class DashPlotter(PlotterBase):
         tpl = plotly_template(theme)
         axis_style = {k: v for k, v in tpl.pop("xaxis", {}).items() if k != "title"}
         y_axis_style = {k: v for k, v in tpl.pop("yaxis", {}).items() if k != "title"}
-        fig.update_layout(autosize=True, **tpl)
+        # Clear the explicit pixel height/width set in build_figure_dict so the
+        # figure fills its CSS container (.lp-panel) instead of overflowing it.
+        fig.update_layout(autosize=True, height=None, width=None, **tpl)
         if axis_style:
             fig.update_xaxes(**axis_style)
         if y_axis_style:
@@ -1463,6 +1471,8 @@ class DashPlotter(PlotterBase):
         layout = self._fig_dict["layout"]
         layout.update(tpl)
         layout["autosize"] = True
+        layout.pop("height", None)
+        layout.pop("width", None)
         for key in list(layout.keys()):
             if key.startswith("xaxis") and isinstance(layout[key], dict):
                 _deep_merge(layout[key], axis_style)
