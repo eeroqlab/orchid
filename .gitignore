@@ -1,6 +1,7 @@
 # Other files and folders
 .settings/
 .vscode/
+.claude/
 *egg-info/
 build/
 dev/
