@@ -25,7 +25,7 @@ dependencies = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-orchid = ["lp_assets/*.css"]
+orchid = ["assets/*.css", "assets/fonts/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1493,7 +1493,7 @@ class DashPlotter(PlotterBase):
         for logger_name in ("werkzeug", "dash", "dash.dash", "flask", "flask.app"):
             logging.getLogger(logger_name).setLevel(logging.ERROR)
 
-        assets_dir = os.path.join(os.path.dirname(__file__), "lp_assets")
+        assets_dir = os.path.join(os.path.dirname(__file__), "assets")
         app = Dash(
             __name__,
             update_title=None,
