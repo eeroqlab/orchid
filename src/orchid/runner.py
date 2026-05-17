@@ -136,6 +136,17 @@ async def _acall_hook(hook, *args):
 # ══════════════════════════════════════════════════════════════════════
 
 
+class _NullWriter:
+    """Drop-in writer used when write_mode=WriteMode.NONE — all calls are no-ops."""
+    overwrite = True
+
+    def write_point(self, *a, **kw): pass
+    def write_trace(self, *a, **kw): pass
+    def write_image(self, *a, **kw): pass
+    def write_all(self, *a, **kw): pass
+    def write_metadata(self, *a, **kw): pass
+
+
 class WriteStrategy(abc.ABC):
     """Base class for sweep execution strategies.
 
@@ -672,22 +683,27 @@ class ExperimentRunner:
         self._validate_virtual_readouts(proc)
         self._reset_limit_logs(proc)
 
-        data_dir = self._get_data_dir(proc)
-        schema = _build_schema(proc)
-        writer = ZarrWriter(
-            root=data_dir,
-            schema=schema,
-            tags=proc.tags,
-            overwrite=False,
-            initialize_arrays=True,
-        )
-
-        (data_dir / "procedure.yaml").write_text(
-            yaml.safe_dump(proc.to_dict(), sort_keys=False, allow_unicode=True)
-        )
+        no_save = proc.write_mode == WriteMode.NONE
+        if no_save:
+            data_dir = None
+            writer = _NullWriter()
+        else:
+            data_dir = self._get_data_dir(proc)
+            schema = _build_schema(proc)
+            writer = ZarrWriter(
+                root=data_dir,
+                schema=schema,
+                tags=proc.tags,
+                overwrite=False,
+                initialize_arrays=True,
+            )
+            (data_dir / "procedure.yaml").write_text(
+                yaml.safe_dump(proc.to_dict(), sort_keys=False, allow_unicode=True)
+            )
 
         if plotter is not None:
             plotter.setup(proc)
+            plotter.set_run_info(data_dir)
 
         total_points = 1
         for s in proc.sweeps:
@@ -703,7 +719,7 @@ class ExperimentRunner:
 
         await _acall_hook(proc.before_experiment)
 
-        strategy_cls = _STRATEGY_MAP[proc.write_mode]
+        strategy_cls = _STRATEGY_MAP.get(proc.write_mode, PointwiseStrategy)
         strategy = strategy_cls(proc, writer, pbar, plotter)
 
         try:
@@ -712,9 +728,10 @@ class ExperimentRunner:
             # Let it propagate — run() handles cleanup via _handle_interrupt()
             raise
         except Exception:
-            meta = {**proc.bench.metadata, **proc.metadata, "status": "error"}
-            writer.overwrite = True
-            writer.write_metadata(meta=meta)
+            if not no_save:
+                meta = {**proc.bench.metadata, **proc.metadata, "status": "error"}
+                writer.overwrite = True
+                writer.write_metadata(meta=meta)
             if pbar:
                 pbar.close()
             raise
@@ -722,18 +739,23 @@ class ExperimentRunner:
         if pbar:
             pbar.close()
 
-        meta = {**proc.bench.metadata, **proc.metadata, "status": "completed"}
-        writer.overwrite = True
-        writer.write_metadata(meta=meta)
+        if not no_save:
+            meta = {**proc.bench.metadata, **proc.metadata, "status": "completed"}
+            writer.overwrite = True
+            writer.write_metadata(meta=meta)
 
         await _acall_hook(proc.after_experiment)
 
-        self._save_limit_log(proc, data_dir)
+        if not no_save:
+            self._save_limit_log(proc, data_dir)
 
         if plotter is not None:
             plotter.stop()
 
-        print(f"Experiment '{proc.name}' completed. Data saved to: {data_dir}")
+        if no_save:
+            print(f"Experiment '{proc.name}' completed. No data saved.")
+        else:
+            print(f"Experiment '{proc.name}' completed. Data saved to: {data_dir}")
         return data_dir
 
     # ── Monitor mode ──────────────────────────────────────────────────
@@ -865,6 +887,7 @@ class ExperimentRunner:
 
         if plotter is not None:
             plotter.setup(proc)
+            plotter.set_run_info(data_dir)
 
         # Populate run state so interrupt handler can print the data path
         if hasattr(self, "_run_state"):

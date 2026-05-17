@@ -558,7 +558,12 @@ proc = Procedure(..., write_mode=WriteMode.PLANEWISE)
 
 # Buffer everything, write once at the end (fastest, but data lost on crash)
 proc = Procedure(..., write_mode=WriteMode.ALL)
+
+# Run without saving anything — useful for dry runs and live visualisation
+proc = Procedure(..., write_mode=WriteMode.NONE)
 ```
+
+With `WriteMode.NONE` no output directory is created and no files are written. The plotter still receives all updates and shows a **NOT SAVING** badge in the header so the absence of recording is visually obvious.
 
 | Mode        | Writes to disk                | zarro method          | Min. sweeps | Trade-off                        |
 |-------------|-------------------------------|-----------------------|-------------|----------------------------------|
@@ -566,6 +571,7 @@ proc = Procedure(..., write_mode=WriteMode.ALL)
 | `SWEEPWISE` | After each inner sweep        | `write_trace(index)`  | 1           | Good balance for 2D/3D scans     |
 | `PLANEWISE` | After each 2D plane           | `write_image(index)`  | 2           | Good for 3D scans                |
 | `ALL`       | Once at the end               | `write_all(data)`     | 1           | Fastest; all data lost on crash  |
+| `NONE`      | Never                         | —                     | 1           | Dry run / live-only; no files created |
 
 **Example — 2D scan with SWEEPWISE:**
 
@@ -1150,13 +1156,16 @@ runner.run(proc, plotter=plotter)
 #### Configuration
 
 ```python
-plotter = LivePlotter(
+plotter = DashPlotter(
     [PlotSpec(x="Vgt", y="sig")],
     port=8050,            # Dash server port (default 8050)
     height=400,           # pixels per subplot row
     width=800,            # figure width
     open_browser=True,    # auto-open browser tab
     update_interval=500,  # poll interval in ms (default 500)
+    theme="orchid",       # UI colour theme (see below)
+    rail_readouts=["T_mc"],            # scalar readouts shown in the side rail
+    instrument_info={"SR830": "GPIB::8"},  # instrument labels in the side rail
 )
 ```
 
@@ -1166,14 +1175,48 @@ The Dash server runs on a background daemon thread. After the experiment complet
 plotter.stop()
 ```
 
-A `LivePlotter` can be reused across experiments — `setup()` resets all state without restarting the server:
+A `DashPlotter` can be reused across experiments — `setup()` resets all state without restarting the server:
 
 ```python
-plotter = LivePlotter([PlotSpec(x="Vgt", y="sig")])
+plotter = DashPlotter([PlotSpec(x="Vgt", y="sig")])
 
 runner.run(proc1, plotter=plotter)  # first experiment
 runner.run(proc2, plotter=plotter)  # fresh plot, same browser tab
 ```
+
+#### Themes
+
+Five built-in colour schemes, switchable live from the **Appearance** menu in the browser:
+
+| Key        | Name       | Style                    |
+|------------|------------|--------------------------|
+| `orchid`   | Orchid     | Default · light · violet |
+| `t1000`    | T1000      | Braun homage · warm cream |
+| `vitsoe`   | Vitsœ      | Office calm · oxblood    |
+| `modern`   | Functional | Modern neutral · green   |
+| `console`  | Console    | Dark lab · amber         |
+
+```python
+plotter = DashPlotter([PlotSpec(x="Vgt", y="sig")], theme="console")
+```
+
+#### Side rail
+
+When sweeps are defined, a side panel shows sweep parameters automatically. Additional readouts and instrument labels can be added:
+
+```python
+plotter = DashPlotter(
+    [PlotSpec(x="Vgt", y="lockin_X")],
+    rail_readouts=["T_mc", "pressure"],          # live scalar values
+    instrument_info={"SR830": "GPIB::8", "Keithley 2400": "USB0::..."},
+)
+```
+
+`rail_readouts` must be `DataKind.SCALAR` readouts registered on the bench.
+
+#### Snapshot
+
+The **Snapshot** button in the header captures the full browser page (plots, header, and rail) as a PNG and downloads it immediately. No server-side dependencies — the capture runs entirely in the browser via `html2canvas`.
 
 ---
 
@@ -2538,14 +2581,19 @@ from orchid import LivePlotter   # backward-compat alias: LivePlotter = DashPlot
 
 Concrete implementation of `PlotterBase` using a Dash/Werkzeug server. The browser polls for updates every `update_interval` milliseconds.
 
-Adds two constructor arguments on top of `PlotterBase`:
+Adds these constructor arguments on top of `PlotterBase`:
 
-| Argument          | Type  | Default | Description                                  |
-|-------------------|-------|---------|----------------------------------------------|
-| `port`            | `int` | `8050`  | Dash server port                             |
-| `update_interval` | `int` | `500`   | Browser polling interval in milliseconds     |
+| Argument           | Type              | Default    | Description                                              |
+|--------------------|-------------------|------------|----------------------------------------------------------|
+| `port`             | `int`             | `8050`     | Dash server port                                         |
+| `update_interval`  | `int`             | `500`      | Browser polling interval in milliseconds                 |
+| `theme`            | `str`             | `"orchid"` | Initial UI colour theme; switchable live in the browser  |
+| `rail_readouts`    | `list[str]`       | `None`     | Scalar readout names to display in the side rail         |
+| `instrument_info`  | `dict[str, str]`  | `None`     | `{name: detail}` entries for the Instruments rail group  |
 
 All `PlotterBase` constructor arguments (`plots`, `height`, `width`, `open_browser`, `event_line`, `max_display_pts`) are also accepted.
+
+Available `theme` values: `"orchid"` (default), `"t1000"`, `"vitsoe"`, `"modern"`, `"console"`.
 
 #### Additional methods
 
@@ -2553,6 +2601,7 @@ All `PlotterBase` constructor arguments (`plots`, `height`, `width`, `open_brows
 |-------------------|-------------------------------------------------------------------------------------------------|
 | `stop()`          | Shut down the Dash server and free the port. Called automatically by the runner after each run. |
 | `is_running`      | `True` if the Dash server thread is alive                                                       |
+| `set_run_info(data_dir, experiment_id=None)` | Called automatically by the runner to display the save path in the header. Pass `None` for `write_mode=NONE`. |
 
 **Reusable across experiments:** `setup()` resets figure state but keeps the server alive, so the browser reconnects without a page reload. Call `stop()` manually to free the port entirely.
 
@@ -2730,6 +2779,7 @@ Controls when data is flushed to disk during a sweep. Maps to zarro `WriteType`.
 | `WriteMode.SWEEPWISE`| `write_trace()`  | 1           | Buffer innermost sweep, write after it completes            |
 | `WriteMode.PLANEWISE`| `write_image()`  | 2           | Buffer two innermost sweeps, write after they complete      |
 | `WriteMode.ALL`      | `write_all()`    | 1           | Buffer entire experiment, write once at the end (fastest)   |
+| `WriteMode.NONE`     | —                | 1           | No data written; plotter still receives all updates. Shows **NOT SAVING** badge in the DashPlotter header. |
 
 ---
 
@@ -2808,6 +2858,7 @@ await strategy.execute()
 | `SWEEPWISE`  | `SweepwiseStrategy`  | Buffer innermost axis, `write_trace()` per row |
 | `PLANEWISE`  | `PlanewiseStrategy`  | Buffer two innermost axes, `write_image()` per plane |
 | `ALL`        | `AllStrategy`        | Buffer everything, single `write_all()`        |
+| `NONE`       | `PointwiseStrategy` + `_NullWriter` | Full sweep loop, all write calls are no-ops; no directory created |
 
 All strategies inherit from `WriteStrategy`, which provides shared helpers:
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import abc
 import copy
+import os
 import threading
 import time
 import warnings
@@ -261,6 +262,38 @@ def _normalize_y_col(y_col, readout) -> list[int] | None:
     return [_resolve_col(c, readout, 'y_col') for c in cols]
 
 
+def _deep_merge(target: dict, source: dict) -> dict:
+    """Recursively merge *source* into *target* in-place. Returns *target*."""
+    for key, val in source.items():
+        if isinstance(val, dict) and isinstance(target.get(key), dict):
+            _deep_merge(target[key], val)
+        else:
+            target[key] = val
+    return target
+
+
+def _format_elapsed_display(elapsed_s: float) -> str:
+    """Format elapsed seconds as ``MM:SS`` or ``H:MM:SS``."""
+    h = int(elapsed_s // 3600)
+    m = int((elapsed_s % 3600) // 60)
+    s = int(elapsed_s % 60)
+    if h > 0:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
+def _format_eta(seconds: float) -> str:
+    """Format a duration as ``MM m SS s`` / ``H h MM m`` / ``SS s``."""
+    if seconds < 60:
+        return f"{int(seconds)} s"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    if h > 0:
+        return f"{h} h {m:02d} m"
+    return f"{m:02d} m {s:02d} s"
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  PlotterBase — all data logic, no server code
 # ══════════════════════════════════════════════════════════════════════
@@ -334,6 +367,13 @@ class PlotterBase(abc.ABC):
         """True if the server is currently running."""
 
     # ── Override hook ──────────────────────────────────────────────────
+
+    def set_run_info(self, data_dir, experiment_id: str | None = None) -> None:
+        """Called by the runner once the data directory is known.
+
+        Override in subclasses to display path / ID in the UI.
+        The default is a no-op.
+        """
 
     def on_data_changed(self) -> None:
         """Called after every write to ``_fig_dict``.
@@ -628,6 +668,16 @@ class PlotterBase(abc.ABC):
         """
         self._stopped = True
 
+    # ── Theme hook (override in subclasses) ────────────────────────────
+
+    def _theme_layout(self, fig) -> None:
+        """Apply theme styling to *fig* (a ``go.Figure``) before serialisation.
+
+        Called at the end of :meth:`build_figure_dict` while the figure is
+        still a live object.  The default is a no-op; :class:`DashPlotter`
+        overrides it to inject colour-scheme tokens from :mod:`.themes`.
+        """
+
     # ── Figure construction ────────────────────────────────────────────
 
     def build_figure_dict(self, proc, n: int) -> dict:
@@ -807,6 +857,7 @@ class PlotterBase(abc.ABC):
                 y=(y0 + y1) / 2, len=y1 - y0, yanchor="middle",
             )
 
+        self._theme_layout(fig)
         return fig.to_dict()
 
     # ── Data update helpers ────────────────────────────────────────────
@@ -969,6 +1020,281 @@ class PlotterBase(abc.ABC):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  DashPlotter UI helpers  (Dash imports are deferred to call time)
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _lp_line_trace_info(plotter) -> list[tuple[str, str]]:
+    """Return ``[(trace_name, css_color_var)]`` for line-plot traces.
+
+    Heatmap traces don't consume colorway slots, so we skip them when
+    computing the scatter index that maps to ``--trace-N`` CSS variables.
+    """
+    if plotter._fig_dict is None or not plotter._resolved_types:
+        return []
+    result = []
+    scatter_idx = 0
+    for i, ptype in enumerate(plotter._resolved_types):
+        offset = plotter._trace_offsets[i]
+        n_next = (plotter._trace_offsets[i + 1]
+                  if i + 1 < len(plotter._trace_offsets)
+                  else len(plotter._fig_dict["data"]))
+        n = n_next - offset
+        if ptype in ("heatmap", "trace_heatmap"):
+            pass  # heatmaps don't consume the scatter colorway
+        elif ptype == "line":
+            for j in range(n):
+                tidx = offset + j
+                name = plotter._fig_dict["data"][tidx].get("name", f"trace {j}")
+                css_color = f"var(--trace-{scatter_idx % 3})"
+                result.append((name, css_color))
+                scatter_idx += 1
+        else:
+            scatter_idx += n  # live_trace — consumes slots but not shown in rail
+    return result
+
+
+def _lp_has_rail(plotter) -> bool:
+    """True when at least one rail section has content to show."""
+    if plotter._proc is None:
+        return False
+    has_sweeps = bool(getattr(plotter._proc, "sweeps", None))
+    has_readouts = bool(plotter.rail_readouts)
+    has_traces = bool(_lp_line_trace_info(plotter))
+    has_instruments = bool(plotter.instrument_info)
+    return has_sweeps or has_readouts or has_traces or has_instruments
+
+
+def _lp_rail_children(plotter) -> list:
+    """Build the full children list for the ``#lp-rail`` div.
+
+    Called on every refresh tick so sweep values and readout values
+    stay current.  Static groups (traces, instruments) are rebuilt each
+    time but produce the same VDOM nodes, so Dash's diff avoids extra
+    DOM mutations.
+    """
+    from dash import html
+
+    proc = plotter._proc
+    children = []
+
+    # ── Sweep group ───────────────────────────────────────────────────
+    sweeps = getattr(proc, "sweeps", None) or []
+    if sweeps:
+        kv_rows = []
+        sv = plotter._last_sweep_values
+        n_axes = len(sweeps)
+
+        for ax_idx, sweep in enumerate(sweeps):
+            # Gather per-controller value arrays
+            if hasattr(sweep, "all_values"):  # MultiSweep
+                ctrl_arrays = list(zip(sweep.controllers, sweep.all_values))
+            else:
+                ctrl_arrays = [(sweep.controller, sweep.values)]
+
+            for ctrl, arr in ctrl_arrays:
+                unit = getattr(ctrl, "unit", None) or ""
+                mn, mx = float(arr.min()), float(arr.max())
+
+                # Range row
+                kv_rows.append(html.Div([
+                    html.Span(f"{ctrl.name} Range", className="lp-kv-k"),
+                    html.Span(f"{mn:.4g} → {mx:.4g}{' ' + unit if unit else ''}",
+                              className="lp-kv-v"),
+                ], className="lp-kv"))
+
+        # Points row  (e.g. "56 × 40")
+        pts_str = " × ".join(str(s.length) for s in sweeps)
+        kv_rows.append(html.Div([
+            html.Span("Points", className="lp-kv-k"),
+            html.Span(pts_str, className="lp-kv-v"),
+        ], className="lp-kv"))
+
+        # ETA row
+        settle = getattr(proc, "settle_time", 0.0) or 0.0
+        if settle > 0:
+            total_pts = 1
+            for s in sweeps:
+                total_pts *= s.length
+            eta_str = _format_eta(total_pts * settle)
+            kv_rows.append(html.Div([
+                html.Span("ETA", className="lp-kv-k"),
+                html.Span(eta_str, className="lp-kv-v"),
+            ], className="lp-kv"))
+
+        children.append(html.Div([
+            html.Div([
+                html.Span("Sweep", className="lp-group-title"),
+                html.Span(f"{n_axes} {'axis' if n_axes == 1 else 'axes'}",
+                          className="lp-group-right"),
+            ], className="lp-group-head"),
+            *kv_rows,
+        ]))
+
+    # ── Readouts group ────────────────────────────────────────────────
+    if plotter.rail_readouts:
+        kv_rows = []
+        for name in plotter.rail_readouts:
+            val = plotter._last_rail_data.get(name)
+            if val is None:
+                val_str = "—"
+            elif isinstance(val, float):
+                val_str = f"{val:.4g}"
+            else:
+                val_str = str(val)
+            unit = ""
+            if hasattr(proc, "bench"):
+                ro = proc.bench.readouts.get(name)
+                if ro:
+                    unit = getattr(ro, "unit", None) or ""
+            display = f"{val_str} {unit}".strip() if unit else val_str
+            kv_rows.append(html.Div([
+                html.Span(name, className="lp-kv-k"),
+                html.Span(display, className="lp-kv-v"),
+            ], className="lp-kv"))
+        children.append(html.Div([
+            html.Div(html.Span("Readouts", className="lp-group-title"),
+                     className="lp-group-head"),
+            *kv_rows,
+        ]))
+
+    # ── Traces group (line plots only) ────────────────────────────────
+    traces = _lp_line_trace_info(plotter)
+    if traces:
+        rows = []
+        for name, css_color in traces:
+            rows.append(html.Div([
+                html.Span(style={
+                    "background": css_color,
+                    "display": "inline-block",
+                    "width": "24px", "height": "3px",
+                    "borderRadius": "2px", "flexShrink": "0",
+                }, className="lp-swatch"),
+                html.Span(name, className="lp-trace-name"),
+            ], className="lp-trace-row"))
+        children.append(html.Div([
+            html.Div(html.Span("Traces", className="lp-group-title"),
+                     className="lp-group-head"),
+            *rows,
+        ]))
+
+    # ── Instruments group ─────────────────────────────────────────────
+    if plotter.instrument_info:
+        rows = []
+        for name, detail in plotter.instrument_info.items():
+            rows.append(html.Div([
+                html.Span(className="lp-dot lp-dot-ok"),
+                html.Div([
+                    html.Div(name, className="lp-inst-name"),
+                    html.Div(str(detail), className="lp-inst-detail"),
+                ], className="lp-inst-meta"),
+            ], className="lp-inst-row"))
+        children.append(html.Div([
+            html.Div(html.Span("Instruments", className="lp-group-title"),
+                     className="lp-group-head"),
+            *rows,
+        ]))
+
+    return children
+
+
+def _lp_header(proc_name: str, theme_name: str, plotter) -> object:
+    """Build the ``<header>`` bar for the DashPlotter page."""
+    from .themes import THEMES
+    from dash import dcc, html
+
+    # Appearance options: one entry per theme
+    options = []
+    for key, td in THEMES.items():
+        traces = td.get("traces", ["#888"])
+        swatches = [
+            html.Span(style={
+                "backgroundColor": traces[i] if i < len(traces) else "#ccc",
+                "display": "inline-block",
+                "width": "14px", "height": "28px",
+            })
+            for i in range(3)
+        ]
+        label = html.Div([
+            html.Span(swatches, style={
+                "display": "inline-flex",
+                "border": "1px solid rgba(128,128,128,0.2)",
+            }),
+            html.Div([
+                html.Div(td["name"], className="lp-theme-name"),
+                html.Div(td.get("sub", ""), className="lp-theme-sub"),
+            ]),
+        ], className="lp-theme-option")
+        options.append({"label": label, "value": key})
+
+    # Mini swatches for the summary trigger
+    cur_td = THEMES.get(theme_name, THEMES["orchid"])
+    cur_traces = cur_td.get("traces", ["#888"])
+    summary_swatches = [
+        html.Span(style={
+            "backgroundColor": cur_traces[i] if i < len(cur_traces) else "#ccc",
+            "display": "inline-block", "width": "8px", "height": "12px",
+        })
+        for i in range(3)
+    ]
+
+    return html.Div(className="lp-header", children=[
+        # Brand mark
+        html.Div(className="lp-brand", children=[
+            html.Div(className="lp-mark"),
+            html.Div([
+                html.Div("orchid", className="lp-brand-name"),
+                html.Div("Live Plot", className="lp-brand-sub"),
+            ]),
+        ]),
+        html.Div(className="lp-divider"),
+        html.Div(className="lp-exp-block", children=[
+            html.Span(proc_name, className="lp-exp-name"),
+            html.Div(id="lp-data-info", className="lp-data-info"),
+        ]),
+        html.Div(className="lp-spacer"),
+        # Elapsed + status
+        html.Div(className="lp-meta", children=[
+            html.Div([
+                html.Div("Elapsed", className="lp-label"),
+                html.Span("--:--", id="lp-elapsed", className="lp-mono"),
+            ]),
+            html.Div(className="lp-status", children=[
+                html.Span(id="lp-dot", className="lp-dot lp-dot-pulse"),
+                html.Span("Running", id="lp-status-text", className="lp-status-text"),
+            ]),
+        ]),
+        # Appearance dropdown
+        html.Details(className="lp-appearance", children=[
+            html.Summary([
+                html.Span("Appearance", className="lp-appearance-current"),
+                html.Span(
+                    summary_swatches,
+                    className="lp-appearance-swatches",
+                    style={"marginLeft": "8px"},
+                ),
+                html.Span(className="lp-chev"),
+            ]),
+            html.Div(className="lp-appearance-panel", children=[
+                html.Div("Theme", className="lp-appearance-heading"),
+                dcc.RadioItems(
+                    id="lp-theme-radio",
+                    options=options,
+                    value=theme_name,
+                    labelClassName="lp-theme-option-label",
+                    inputStyle={"display": "none"},
+                ),
+            ]),
+        ]),
+        # Snapshot
+        html.Div(className="lp-acq", children=[
+            html.Button("Snapshot", id="lp-snapshot", className="lp-btn lp-btn-ghost",
+                        n_clicks=0),
+        ]),
+    ])
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  DashPlotter — Dash/Werkzeug backend (poll-based)
 # ══════════════════════════════════════════════════════════════════════
 
@@ -993,23 +1319,34 @@ class DashPlotter(PlotterBase):
     open_browser : bool
         If True, automatically open the plot in the default browser.
     update_interval : int
-        Dash polling interval in milliseconds. Lower = faster updates
-        but more CPU. Default 500 ms.
+        Dash polling interval in milliseconds. Default 500 ms.
     event_line : EventLineConfig, optional
         Visual style for parameter-change markers on monitor plots.
     max_display_pts : int
         Maximum points shown on line plots (rolling window for monitors).
         Default 5000.
+    theme : str
+        Initial UI theme. One of ``"orchid"`` (default), ``"t1000"``,
+        ``"vitsoe"``, ``"modern"``, ``"console"``.  Switchable live via
+        the Appearance dropdown in the browser.
+    rail_readouts : list of str, optional
+        Readout names whose scalar values appear in the control rail.
+        Must be ``DataKind.SCALAR`` readouts registered on the bench.
+    instrument_info : dict, optional
+        ``{name: detail}`` annotations for the Instruments rail group,
+        e.g. ``{"SR830": "GPIB::8", "Keithley": "USB0::..."}``.
 
     Examples
     --------
     >>> plotter = DashPlotter([PlotSpec(x="Vgt", y="lockin_X")])
     >>> runner.run(proc, plotter=plotter)
 
-    >>> plotter = DashPlotter([
-    ...     PlotSpec(x="Vgt", y="lockin_X"),
-    ...     PlotSpec(x="Vgt", y="lockin_Y"),
-    ... ])
+    >>> plotter = DashPlotter(
+    ...     [PlotSpec(x="Vgt", y="lockin_X")],
+    ...     theme="console",
+    ...     rail_readouts=["T_mc"],
+    ...     instrument_info={"SR830": "GPIB::8"},
+    ... )
     """
 
     def __init__(
@@ -1022,6 +1359,9 @@ class DashPlotter(PlotterBase):
         update_interval: int = 500,
         event_line: EventLineConfig | None = None,
         max_display_pts: int = 5000,
+        theme: str = "orchid",
+        rail_readouts: list[str] | None = None,
+        instrument_info: dict[str, str] | None = None,
     ):
         super().__init__(
             plots=plots,
@@ -1033,6 +1373,15 @@ class DashPlotter(PlotterBase):
         )
         self.port = port
         self.update_interval = update_interval
+        self.rail_readouts: list[str] = list(rail_readouts) if rail_readouts else []
+        self.instrument_info: dict[str, str] = dict(instrument_info) if instrument_info else {}
+
+        self._current_theme: str = theme
+        self._last_rail_data: dict = {}
+        self._last_sweep_values: dict = {}
+        self._start_time: float | None = None
+        self._data_dir: str | None = None
+        self._experiment_id: str | None = None
 
         # Poll-version counter — Dash reads these in the refresh() callback
         self._data_version = 0
@@ -1043,10 +1392,86 @@ class DashPlotter(PlotterBase):
         self._dash_app = None
 
     def setup(self, proc) -> None:
-        # Reset poll counters before calling base setup (which builds the figure)
+        # Reset all per-experiment state before base setup (which builds the figure)
         self._data_version = 0
         self._last_sent_version = -1
+        self._last_rail_data = {}
+        self._last_sweep_values = {}
+        self._start_time = time.time()
         super().setup(proc)
+
+    # ── Rail data caching ──────────────────────────────────────────────
+
+    def dispatch(self, event: str, index, data: dict, sweep_values: dict) -> None:
+        """Cache sweep / readout values for the rail, then route to base."""
+        if sweep_values:
+            self._last_sweep_values = dict(sweep_values)
+        if self.rail_readouts and data:
+            for name in self.rail_readouts:
+                if name in data:
+                    self._last_rail_data[name] = data[name]
+        super().dispatch(event, index, data, sweep_values)
+
+    def update_monitor(self, sample_idx: int, data: dict, timestamp: float) -> None:
+        """Cache readout values for the rail, then route to base."""
+        if self.rail_readouts and data:
+            for name in self.rail_readouts:
+                if name in data:
+                    self._last_rail_data[name] = data[name]
+        super().update_monitor(sample_idx, data, timestamp)
+
+    # ── Theme ──────────────────────────────────────────────────────────
+
+    def _theme_layout(self, fig) -> None:
+        """Apply the current colour theme to the freshly built figure.
+
+        Also sets ``autosize=True`` so the figure fills its CSS container
+        (the `.lp-panel` flex cell) rather than using the fixed
+        ``height_per_plot * n`` value set in ``build_figure_dict``.
+        """
+        from .themes import THEMES, plotly_template
+        theme = THEMES.get(self._current_theme, THEMES["orchid"])
+        tpl = plotly_template(theme)
+        axis_style = {k: v for k, v in tpl.pop("xaxis", {}).items() if k != "title"}
+        y_axis_style = {k: v for k, v in tpl.pop("yaxis", {}).items() if k != "title"}
+        # Clear the explicit pixel height/width set in build_figure_dict so the
+        # figure fills its CSS container (.lp-panel) instead of overflowing it.
+        fig.update_layout(autosize=True, height=None, width=None, **tpl)
+        if axis_style:
+            fig.update_xaxes(**axis_style)
+        if y_axis_style:
+            fig.update_yaxes(**y_axis_style)
+
+    def _retheme_fig_dict(self, theme_name: str) -> None:
+        """Apply a new theme to ``_fig_dict`` in-place (no go.Figure needed)."""
+        if self._fig_dict is None:
+            return
+        from .themes import THEMES, plotly_template
+        theme = THEMES.get(theme_name, THEMES["orchid"])
+        tpl = plotly_template(theme)
+        # Strip axis sub-dicts; merge them separately to preserve title text
+        axis_style = {k: v for k, v in tpl.pop("xaxis", {}).items() if k != "title"}
+        y_axis_style = {k: v for k, v in tpl.pop("yaxis", {}).items() if k != "title"}
+        layout = self._fig_dict["layout"]
+        layout.update(tpl)
+        layout["autosize"] = True
+        layout.pop("height", None)
+        layout.pop("width", None)
+        for key in list(layout.keys()):
+            if key.startswith("xaxis") and isinstance(layout[key], dict):
+                _deep_merge(layout[key], axis_style)
+            elif key.startswith("yaxis") and isinstance(layout[key], dict):
+                _deep_merge(layout[key], y_axis_style)
+        self._current_theme = theme_name
+
+    def set_run_info(self, data_dir, experiment_id: str | None = None) -> None:
+        """Store data path for display in the header; triggers a UI refresh.
+
+        Pass ``data_dir=None`` (write_mode=NONE) to show a "not saving" badge.
+        """
+        self._data_dir = "" if data_dir is None else str(data_dir)
+        self._experiment_id = experiment_id
+        self._data_version += 1
 
     # ── PlotterBase interface ──────────────────────────────────────────
 
@@ -1061,44 +1486,170 @@ class DashPlotter(PlotterBase):
 
     def _start_server(self) -> None:
         """Launch Dash app on a background daemon thread."""
-        from dash import Dash, dcc, html
-        from dash.dependencies import Input, Output
         import logging
+        from dash import Dash, dcc, html, no_update
+        from dash.dependencies import Input, Output, State
 
-        # Suppress Dash/Flask/Werkzeug startup logs
         for logger_name in ("werkzeug", "dash", "dash.dash", "flask", "flask.app"):
             logging.getLogger(logger_name).setLevel(logging.ERROR)
 
-        app = Dash(__name__, update_title=None)
+        assets_dir = os.path.join(os.path.dirname(__file__), "assets")
+        app = Dash(
+            __name__,
+            update_title=None,
+            assets_folder=assets_dir,
+            external_scripts=[
+                "https://html2canvas.hertzen.com/dist/html2canvas.min.js"
+            ],
+        )
         app.title = self._proc.name if self._proc else "Orchid Live Plot"
         app.logger.setLevel(logging.ERROR)
         self._dash_app = app
 
         plotter = self
 
-        # Callable layout: re-evaluated on every fresh browser load so the
-        # browser always gets the current figure after setup() replaces _fig_dict.
+        # Callable layout — re-evaluated on every fresh browser load so that a
+        # new tab always sees the current figure and theme after setup() runs.
         def serve_layout():
-            return html.Div([
-                dcc.Graph(id="live-graph", figure=plotter._fig_dict or {}),
-                dcc.Interval(id="interval", interval=self.update_interval, n_intervals=0),
-            ])
+            theme_name = plotter._current_theme
+            proc_name = plotter._proc.name if plotter._proc else "Orchid"
+            has_rail = _lp_has_rail(plotter)
+            return html.Div(
+                id="lp-root",
+                className=f"theme-{theme_name}",
+                children=[
+                    _lp_header(proc_name, theme_name, plotter),
+                    html.Div(
+                        className="lp-body",
+                        children=[
+                            html.Div(
+                                className="lp-plots",
+                                children=[html.Div(
+                                    className="lp-panel",
+                                    children=[html.Div(
+                                        className="lp-graph",
+                                        children=[dcc.Graph(
+                                            id="live-graph",
+                                            figure=plotter._fig_dict or {},
+                                            config={"responsive": True,
+                                                    "displayModeBar": True},
+                                            style={"height": "100%"},
+                                        )],
+                                    )],
+                                )],
+                            ),
+                            # Rail — always in DOM so callback IDs resolve;
+                            # lp-rail class only added when content exists.
+                            html.Div(
+                                id="lp-rail",
+                                className="lp-rail" if has_rail else "",
+                                children=_lp_rail_children(plotter) if has_rail else [],
+                            ),
+                        ],
+                    ),
+                    dcc.Interval(id="interval", interval=plotter.update_interval,
+                                 n_intervals=0),
+                    html.Div(id="lp-snap-dummy", style={"display": "none"}),
+                ],
+            )
 
         app.layout = serve_layout
 
+        # ── Main refresh callback ──────────────────────────────────────
         @app.callback(
             Output("live-graph", "figure"),
+            Output("lp-elapsed", "children"),
+            Output("lp-dot", "className"),
+            Output("lp-status-text", "children"),
+            Output("lp-rail", "children"),
+            Output("lp-data-info", "children"),
             Input("interval", "n_intervals"),
+            Input("lp-theme-radio", "value"),
         )
-        def refresh(n):
-            from dash import no_update
-            # Always flush pending data before checking stopped — this ensures
-            # the final batch of points written just before finalize() reaches
-            # the browser even if the experiment finished between two polls.
-            if plotter._data_version != plotter._last_sent_version:
+        def refresh(n, theme_name):
+            # Retheme when theme radio changes
+            if theme_name != plotter._current_theme:
+                plotter._retheme_fig_dict(theme_name)
+                fig_out = plotter._fig_dict
                 plotter._last_sent_version = plotter._data_version
-                return plotter._fig_dict
-            return no_update
+            elif plotter._data_version != plotter._last_sent_version:
+                plotter._last_sent_version = plotter._data_version
+                fig_out = plotter._fig_dict
+            else:
+                fig_out = no_update
+
+            # Elapsed time
+            if plotter._start_time is not None:
+                elapsed_str = _format_elapsed_display(time.time() - plotter._start_time)
+            else:
+                elapsed_str = "--:--"
+
+            # Status dot + text
+            if plotter._stopped:
+                dot_cls = "lp-dot lp-dot-idle"
+                status_text = "Done"
+            else:
+                dot_cls = "lp-dot lp-dot-pulse"
+                status_text = "Running"
+
+            # Rail children (sweep values and readout values update each tick)
+            has_rail = _lp_has_rail(plotter)
+            rail_children = _lp_rail_children(plotter) if has_rail else []
+
+            # Data path info — split into parent dir and experiment leaf
+            import os as _os
+            from dash import html as _html
+            p = plotter._data_dir
+            if p is None:
+                # set_run_info not yet called — show nothing
+                data_info = []
+            elif p == "":
+                # write_mode=NONE — explicitly not saving
+                data_info = [_html.Span("not saving", className="lp-data-nosave")]
+            else:
+                home = _os.path.expanduser("~")
+                parent = _os.path.dirname(p)
+                leaf = _os.path.basename(p)
+                parent_abbr = ("~" + parent[len(home):] if parent.startswith(home) else parent) + "/"
+                data_info = [
+                    _html.Span(parent_abbr, className="lp-data-dir"),
+                    _html.Span(leaf, className="lp-data-id"),
+                ]
+
+            return fig_out, elapsed_str, dot_cls, status_text, rail_children, data_info
+
+        # ── Theme class update ─────────────────────────────────────────
+        @app.callback(
+            Output("lp-root", "className"),
+            Input("lp-theme-radio", "value"),
+            prevent_initial_call=True,
+        )
+        def update_theme_class(theme_name):
+            return f"theme-{theme_name}"
+
+        # ── Snapshot — client-side full-page capture via html2canvas ──
+        app.clientside_callback(
+            """
+            function(n) {
+                if (!n) return '';
+                var root = document.getElementById('lp-root');
+                var panel = root.querySelector('.lp-appearance-panel');
+                if (panel) panel.style.display = 'none';
+                html2canvas(root, {scale: 2, useCORS: true, logging: false})
+                    .then(function(canvas) {
+                        if (panel) panel.style.display = '';
+                        var a = document.createElement('a');
+                        a.download = 'orchid_snapshot.png';
+                        a.href = canvas.toDataURL('image/png');
+                        a.click();
+                    });
+                return '';
+            }
+            """,
+            Output("lp-snap-dummy", "children"),
+            Input("lp-snapshot", "n_clicks"),
+            prevent_initial_call=True,
+        )
 
         # Suppress the Flask "Serving Flask app" CLI banner
         try:
@@ -1109,7 +1660,7 @@ class DashPlotter(PlotterBase):
 
         from werkzeug.serving import make_server
 
-        # Bind socket on the calling thread — fails immediately if port is in use
+        # Bind socket on the calling thread so port errors surface immediately
         srv = make_server("127.0.0.1", self.port, app.server)
         self._wsgi_server = srv
 

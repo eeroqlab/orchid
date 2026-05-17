@@ -13,10 +13,10 @@ Orchid connects your lab instruments (pymeasure, qcodes, or custom drivers) to a
 - **Controller limits and bindings** — clamp, log, raise, or bind one logical control to multiple physical channels
 - **1D / 2D / 3D sweeps** with snake scan and hysteresis support
 - **Time-series monitoring** with configurable interval, duration, and stop conditions
-- **Flexible write modes** — write per point, per sweep, per plane, or all at once
+- **Flexible write modes** — write per point, per sweep, per plane, all at once, or skip saving entirely (`NONE` for dry runs)
 - **Custom hooks** — inject logic before/after experiments, sweeps, and measurement points
 - **Async support** — both sync and async instrument drivers
-- **Live plotting** — real-time Dash browser window (line, heatmap, multi-trace, custom)
+- **Live plotting** — real-time Dash browser window with themes, sweep rail, and snapshot (line, heatmap, multi-trace, custom)
 - **Configurable error handling** — stop, retry+skip, or ignore
 - **Automatic data saving** — Zarr v3 (via zarro) with metadata YAML
 - **Live snapshot** — `ctx.snapshot()` prints a formatted table of all current values
@@ -115,6 +115,7 @@ Control when data is flushed to disk:
 | `SWEEPWISE` | After each inner sweep  | `write_trace()`  | 2D / 3D scans        |
 | `PLANEWISE` | After each 2D plane     | `write_image()`  | 3D scans              |
 | `ALL`       | Once at the end         | `write_all()`    | Fast, small scans     |
+| `NONE`      | Never                   | —                | Dry runs, live-only   |
 
 ```python
 proc = Procedure(..., write_mode=WriteMode.SWEEPWISE)

@@ -80,11 +80,16 @@ class WriteMode(StrEnum):
     ALL : buffer the entire experiment, write once at the end.
         Uses ``ZarrWriter.write_all(data)``.
         No index needed. Fastest I/O but all data lost on crash.
+
+    NONE : run the sweep without writing any data to disk.
+        Useful for dry runs and live visualisation without recording.
+        The plotter still receives all updates.
     """
     POINTWISE = "pointwise"
     SWEEPWISE = "sweepwise"
     PLANEWISE = "planewise"
     ALL = "all"
+    NONE = "none"
 
 
 @dataclass
