@@ -225,7 +225,38 @@ body {
   height: 60%; width: 1px; background: var(--hairline); margin: 0 6px;
 }
 
+.lp-exp-block { display: flex; flex-direction: column; gap: 1px; }
 .lp-exp-name { font-size: 14px; font-weight: 500; color: var(--ink); }
+.lp-data-info {
+  display: flex;
+  align-items: baseline;
+  gap: 0;
+  font-size: 10px;
+  font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  max-width: 320px;
+}
+.lp-data-dir {
+  color: var(--ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex-shrink: 1;
+}
+.lp-data-id {
+  color: var(--ink-mute);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.lp-data-nosave {
+  font-size: 10px;
+  font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;
+  color: var(--err);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
 .lp-spacer { flex: 1; }
 
 .lp-meta {

@@ -368,6 +368,13 @@ class PlotterBase(abc.ABC):
 
     # ── Override hook ──────────────────────────────────────────────────
 
+    def set_run_info(self, data_dir, experiment_id: str | None = None) -> None:
+        """Called by the runner once the data directory is known.
+
+        Override in subclasses to display path / ID in the UI.
+        The default is a no-op.
+        """
+
     def on_data_changed(self) -> None:
         """Called after every write to ``_fig_dict``.
 
@@ -1079,7 +1086,6 @@ def _lp_rail_children(plotter) -> list:
         n_axes = len(sweeps)
 
         for ax_idx, sweep in enumerate(sweeps):
-            is_innermost = (ax_idx == n_axes - 1)
             # Gather per-controller value arrays
             if hasattr(sweep, "all_values"):  # MultiSweep
                 ctrl_arrays = list(zip(sweep.controllers, sweep.all_values))
@@ -1089,39 +1095,12 @@ def _lp_rail_children(plotter) -> list:
             for ctrl, arr in ctrl_arrays:
                 unit = getattr(ctrl, "unit", None) or ""
                 mn, mx = float(arr.min()), float(arr.max())
-                n_pts = len(arr)
-
-                def _fmt(v):
-                    return f"{v:.4g} {unit}".strip() if unit else f"{v:.4g}"
 
                 # Range row
                 kv_rows.append(html.Div([
                     html.Span(f"{ctrl.name} Range", className="lp-kv-k"),
                     html.Span(f"{mn:.4g} → {mx:.4g}{' ' + unit if unit else ''}",
                               className="lp-kv-v"),
-                ], className="lp-kv"))
-
-                # Step row (only when > 1 point)
-                if n_pts > 1:
-                    step = (mx - mn) / (n_pts - 1)
-                    kv_rows.append(html.Div([
-                        html.Span(f"{ctrl.name} Step", className="lp-kv-k"),
-                        html.Span(_fmt(step), className="lp-kv-v"),
-                    ], className="lp-kv"))
-
-                # Now row — accent on innermost (fastest-changing) axis
-                # sweep_values may be an array (full inner sweep in SWEEPWISE mode);
-                # take the last element which is the most recently set value.
-                val = sv.get(ctrl.name)
-                if val is None:
-                    val_str = "—"
-                else:
-                    v = np.asarray(val)
-                    val_str = _fmt(float(v.flat[-1]))
-                now_cls = "lp-kv-v lp-accent" if is_innermost else "lp-kv-v"
-                kv_rows.append(html.Div([
-                    html.Span(f"{ctrl.name} Now", className="lp-kv-k"),
-                    html.Span(val_str, className=now_cls),
                 ], className="lp-kv"))
 
         # Points row  (e.g. "56 × 40")
@@ -1269,7 +1248,10 @@ def _lp_header(proc_name: str, theme_name: str, plotter) -> object:
             ]),
         ]),
         html.Div(className="lp-divider"),
-        html.Span(proc_name, className="lp-exp-name"),
+        html.Div(className="lp-exp-block", children=[
+            html.Span(proc_name, className="lp-exp-name"),
+            html.Div(id="lp-data-info", className="lp-data-info"),
+        ]),
         html.Div(className="lp-spacer"),
         # Elapsed + status
         html.Div(className="lp-meta", children=[
@@ -1398,6 +1380,8 @@ class DashPlotter(PlotterBase):
         self._last_rail_data: dict = {}
         self._last_sweep_values: dict = {}
         self._start_time: float | None = None
+        self._data_dir: str | None = None
+        self._experiment_id: str | None = None
 
         # Poll-version counter — Dash reads these in the refresh() callback
         self._data_version = 0
@@ -1480,6 +1464,15 @@ class DashPlotter(PlotterBase):
                 _deep_merge(layout[key], y_axis_style)
         self._current_theme = theme_name
 
+    def set_run_info(self, data_dir, experiment_id: str | None = None) -> None:
+        """Store data path for display in the header; triggers a UI refresh.
+
+        Pass ``data_dir=None`` (write_mode=NONE) to show a "not saving" badge.
+        """
+        self._data_dir = "" if data_dir is None else str(data_dir)
+        self._experiment_id = experiment_id
+        self._data_version += 1
+
     # ── PlotterBase interface ──────────────────────────────────────────
 
     def on_data_changed(self) -> None:
@@ -1501,7 +1494,14 @@ class DashPlotter(PlotterBase):
             logging.getLogger(logger_name).setLevel(logging.ERROR)
 
         assets_dir = os.path.join(os.path.dirname(__file__), "lp_assets")
-        app = Dash(__name__, update_title=None, assets_folder=assets_dir)
+        app = Dash(
+            __name__,
+            update_title=None,
+            assets_folder=assets_dir,
+            external_scripts=[
+                "https://html2canvas.hertzen.com/dist/html2canvas.min.js"
+            ],
+        )
         app.title = self._proc.name if self._proc else "Orchid Live Plot"
         app.logger.setLevel(logging.ERROR)
         self._dash_app = app
@@ -1549,7 +1549,7 @@ class DashPlotter(PlotterBase):
                     ),
                     dcc.Interval(id="interval", interval=plotter.update_interval,
                                  n_intervals=0),
-                    dcc.Download(id="lp-download"),
+                    html.Div(id="lp-snap-dummy", style={"display": "none"}),
                 ],
             )
 
@@ -1562,6 +1562,7 @@ class DashPlotter(PlotterBase):
             Output("lp-dot", "className"),
             Output("lp-status-text", "children"),
             Output("lp-rail", "children"),
+            Output("lp-data-info", "children"),
             Input("interval", "n_intervals"),
             Input("lp-theme-radio", "value"),
         )
@@ -1595,7 +1596,27 @@ class DashPlotter(PlotterBase):
             has_rail = _lp_has_rail(plotter)
             rail_children = _lp_rail_children(plotter) if has_rail else []
 
-            return fig_out, elapsed_str, dot_cls, status_text, rail_children
+            # Data path info — split into parent dir and experiment leaf
+            import os as _os
+            from dash import html as _html
+            p = plotter._data_dir
+            if p is None:
+                # set_run_info not yet called — show nothing
+                data_info = []
+            elif p == "":
+                # write_mode=NONE — explicitly not saving
+                data_info = [_html.Span("not saving", className="lp-data-nosave")]
+            else:
+                home = _os.path.expanduser("~")
+                parent = _os.path.dirname(p)
+                leaf = _os.path.basename(p)
+                parent_abbr = ("~" + parent[len(home):] if parent.startswith(home) else parent) + "/"
+                data_info = [
+                    _html.Span(parent_abbr, className="lp-data-dir"),
+                    _html.Span(leaf, className="lp-data-id"),
+                ]
+
+            return fig_out, elapsed_str, dot_cls, status_text, rail_children, data_info
 
         # ── Theme class update ─────────────────────────────────────────
         @app.callback(
@@ -1606,23 +1627,29 @@ class DashPlotter(PlotterBase):
         def update_theme_class(theme_name):
             return f"theme-{theme_name}"
 
-        # ── Snapshot ───────────────────────────────────────────────────
-        @app.callback(
-            Output("lp-download", "data"),
+        # ── Snapshot — client-side full-page capture via html2canvas ──
+        app.clientside_callback(
+            """
+            function(n) {
+                if (!n) return '';
+                var root = document.getElementById('lp-root');
+                var panel = root.querySelector('.lp-appearance-panel');
+                if (panel) panel.style.display = 'none';
+                html2canvas(root, {scale: 2, useCORS: true, logging: false})
+                    .then(function(canvas) {
+                        if (panel) panel.style.display = '';
+                        var a = document.createElement('a');
+                        a.download = 'orchid_snapshot.png';
+                        a.href = canvas.toDataURL('image/png');
+                        a.click();
+                    });
+                return '';
+            }
+            """,
+            Output("lp-snap-dummy", "children"),
             Input("lp-snapshot", "n_clicks"),
-            State("live-graph", "figure"),
             prevent_initial_call=True,
         )
-        def snapshot(n_clicks, fig_dict):
-            if not n_clicks or fig_dict is None:
-                return no_update
-            try:
-                import plotly.graph_objects as go
-                import plotly.io as pio
-                img = pio.to_image(go.Figure(fig_dict), format="png", scale=2)
-                return dcc.send_bytes(img, "orchid_plot.png")
-            except Exception:
-                return no_update
 
         # Suppress the Flask "Serving Flask app" CLI banner
         try:
