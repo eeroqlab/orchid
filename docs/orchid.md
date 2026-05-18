@@ -1523,14 +1523,20 @@ Each event dict contains:
 
 **Live plot integration:**
 
-If a `LivePlotter` is passed with a `PlotSpec(x="_time", ...)`, each parameter change appears as a vertical dashed line annotated with the parameter name and value — visible in real time as you change parameters:
+If a `DashPlotter` is passed with a `PlotSpec(x="_time", ...)`, each parameter change is shown in the event UI:
+
+- A **diamond marker** appears in a thin strip above the plot, coloured per parameter.
+- An **event log** entry appears in the side rail showing the timestamp, parameter name, and value.
+- **Clicking** a diamond or a log row highlights it: a vertical guide line appears on the plot and the row is marked as selected. Shift-click to range-select; click again or press Esc to deselect.
 
 ```python
-plotter = LivePlotter([PlotSpec(x="_time", y="lockin_X")])
+plotter = DashPlotter([PlotSpec(x="_time", y="lockin_X")])
 runner.run_monitor(monitor, plotter=plotter, background=True)
 
-bench["Vgt"] = 0.5   # dashed marker line appears on the plot immediately
+bench["Vgt"] = 0.5   # diamond appears in the strip; event logged in the rail
 ```
+
+The `color` field of `EventLineConfig` controls the default diamond colour for the selection guide lines. Each unique parameter name is automatically assigned a distinct colour from the built-in palette.
 
 If no events occurred during the run, no `events.yaml` is written.
 
@@ -1979,7 +1985,7 @@ print(panel.is_running)  # False
 
 #### Integration with live plots
 
-Because `panel.set()` writes via `bench[name] = val`, every change fires the bench event log automatically. If a `LivePlotter` with `x="_time"` is running alongside, parameter changes appear as annotated vertical lines on the plot without any extra wiring.
+Because `panel.set()` writes via `bench[name] = val`, every change fires the bench event log automatically. If a `DashPlotter` with `x="_time"` is running alongside, parameter changes appear as diamond markers in the event strip and entries in the event log, without any extra wiring.
 
 ```python
 plotter = LivePlotter([PlotSpec(x="_time", y="lockin_X")])
@@ -2447,29 +2453,16 @@ happens on `close()`, so no data is lost on normal exit or `Ctrl+C`.
 from orchid import EventLineConfig
 ```
 
-Visual properties for parameter-change event markers drawn on time-series plots.
+Visual properties for parameter-change event markers on monitor plots.
 
-| Argument      | Type  | Default                    | Description                                                         |
-|---------------|-------|----------------------------|---------------------------------------------------------------------|
-| `color`       | `str` | `"#444444"`                | Line and label font color. Any CSS/plotly color string.             |
-| `width`       | `int` | `2`                        | Line width in pixels.                                               |
-| `dash`        | `str` | `"dash"`                   | Line style: `"solid"`, `"dot"`, `"dash"`, `"longdash"`, `"dashdot"`. |
-| `font_size`   | `int` | `15`                       | Label font size in points.                                          |
-| `bgcolor`     | `str` | `"rgba(255,255,255,0.85)"` | Label box background color. Use `rgba(r,g,b,a)` for transparency.  |
-| `bordercolor` | `str` | `"#000000"`                | Label box border color.                                             |
-| `borderwidth` | `int` | `1`                        | Label box border width in pixels.                                   |
-| `borderpad`   | `int` | `3`                        | Padding in pixels between the label text and the box border.        |
-
-Labels are rotated 90° and centered vertically on the event line.
+| Argument | Type  | Default     | Description                                                            |
+|----------|-------|-------------|------------------------------------------------------------------------|
+| `color`  | `str` | `"#444444"` | Colour used for selection guide lines. Each parameter is also assigned a distinct colour from the built-in palette; `color` serves as the fallback for guide lines. |
 
 ```python
-plotter = LivePlotter(
+plotter = DashPlotter(
     [PlotSpec(x="_time", y="lockin_X")],
-    event_line=EventLineConfig(
-        color="#2255cc",
-        dash="dot",
-        bgcolor="rgba(255,255,255,0.0)",  # transparent box (no box)
-    ),
+    event_line=EventLineConfig(color="#2255cc"),
 )
 ```
 
@@ -2538,7 +2531,7 @@ Override `on_data_changed()` to push updates to your server after each data writ
 | `update_sweep(outer_index, data, sweep_values)`| After each inner sweep completes                                            |
 | `update_plane(outer_index, data, sweep_values)`| After each 2D plane completes                                               |
 | `update_monitor(sample_idx, data, timestamp)`  | After each monitor sample. `x="_time"` auto-scales to s/min/hr from zero.  |
-| `notify_event(timestamp, param, value)`        | Draw a vertical event line on all `x="_time"` subplots                      |
+| `notify_event(timestamp, param, value)`        | Add a diamond marker to the event strip and log entry to the rail sidebar   |
 | `finalize()`                                   | Mark experiment done (stops polling; server stays up for zoom/pan)          |
 | `stop()`                                       | *(abstract)* Stop server, free resources                                    |
 | `is_running` *(property)*                      | *(abstract)* `True` if the server is running                                |
@@ -2567,7 +2560,7 @@ Override `on_data_changed()` to push updates to your server after each data writ
 | `height`          | `int`                      | `350`               | Height in pixels per subplot         |
 | `width`           | `int`                      | `700`               | Figure width in pixels               |
 | `open_browser`    | `bool`                     | `True`              | Auto-open browser when server starts |
-| `event_line`      | `EventLineConfig` or `None`| `EventLineConfig()` | Style for parameter-change markers   |
+| `event_line`      | `EventLineConfig` or `None`| `EventLineConfig()` | Colour for selection guide lines on monitor plots |
 | `max_display_pts` | `int`                      | `5000`              | Rolling window size for monitor line plots |
 
 ---
@@ -2616,6 +2609,20 @@ When `x="_time"` is used (monitoring mode), the x-axis shows elapsed time from z
 | ≥ 2 hours    | hours       | Time (hr)  |
 
 The label updates automatically. Existing data points are rescaled when the unit changes.
+
+#### Event strip (monitor mode)
+
+When a `DashPlotter` is used with a monitor procedure, every `bench["param"] = value` call fires an event that appears in two places:
+
+- **Strip** — a row of coloured diamond markers above the plot, one per event. Each unique parameter name gets a distinct colour from the built-in 8-colour palette.
+- **Event log** — a scrollable list in the side rail showing `MM:SS / param / value` for every event, newest first.
+
+**Interaction:**
+- Click a diamond or a log row to select it — a vertical guide line appears on the plot and the row highlights.
+- Click again to deselect, or Shift-click a second row to range-select.
+- Press Esc or click **Clear** to clear all selections.
+
+The x-coordinates of diamonds and guide lines are kept in sync with the time axis unit (s → min → hr).
 
 #### Usage
 

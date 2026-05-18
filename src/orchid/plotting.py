@@ -272,6 +272,12 @@ def _deep_merge(target: dict, source: dict) -> dict:
     return target
 
 
+_EV_PALETTE = [
+    "#4878d0", "#ee854a", "#6acc64", "#d65f5f",
+    "#956cb4", "#8c613c", "#d5bb67", "#82c6e2",
+]
+
+
 def _format_elapsed_display(elapsed_s: float) -> str:
     """Format elapsed seconds as ``MM:SS`` or ``H:MM:SS``."""
     h = int(elapsed_s // 3600)
@@ -1034,11 +1040,13 @@ def _lp_line_trace_info(plotter) -> list[tuple[str, str]]:
         return []
     result = []
     scatter_idx = 0
+    strip_idx = getattr(plotter, '_strip_trace_idx', None)
+    n_data = strip_idx if strip_idx is not None else len(plotter._fig_dict["data"])
     for i, ptype in enumerate(plotter._resolved_types):
         offset = plotter._trace_offsets[i]
         n_next = (plotter._trace_offsets[i + 1]
                   if i + 1 < len(plotter._trace_offsets)
-                  else len(plotter._fig_dict["data"]))
+                  else n_data)
         n = n_next - offset
         if ptype in ("heatmap", "trace_heatmap"):
             pass  # heatmaps don't consume the scatter colorway
@@ -1062,7 +1070,8 @@ def _lp_has_rail(plotter) -> bool:
     has_readouts = bool(plotter.rail_readouts)
     has_traces = bool(_lp_line_trace_info(plotter))
     has_instruments = bool(plotter.instrument_info)
-    return has_sweeps or has_readouts or has_traces or has_instruments
+    has_events = bool(getattr(plotter, '_events', None))
+    return has_sweeps or has_readouts or has_traces or has_instruments or has_events
 
 
 def _lp_rail_children(plotter) -> list:
@@ -1193,6 +1202,53 @@ def _lp_rail_children(plotter) -> list:
             html.Div(html.Span("Instruments", className="lp-group-title"),
                      className="lp-group-head"),
             *rows,
+        ]))
+
+    # ── Events group ──────────────────────────────────────────────────
+    if getattr(plotter, '_events', None):
+        selected_set = set(plotter._event_selection or [])
+        n_sel = len(selected_set)
+        rows = []
+        for ev in reversed(plotter._events):
+            is_sel = ev["id"] in selected_set
+            color = ev.get("color", "#888")
+            is_toggle = ev.get("is_toggle", False)
+            subtitle = "state" if is_toggle else "setpoint"
+            val_cls = "lp-ev-val"
+            if is_toggle:
+                val_cls += " lp-ev-val-on" if ev["value"] else " lp-ev-val-off"
+            rows.append(html.Div(
+                id={"type": "lp-ev-row", "id": ev["id"]},
+                className="lp-ev-row" + (" lp-ev-row-sel" if is_sel else ""),
+                n_clicks=0,
+                children=[
+                    html.Span(style={"background": color}, className="lp-ev-colorbar"),
+                    html.Span("✕" if is_sel else "", className="lp-ev-check" + (" lp-ev-check-sel" if is_sel else "")),
+                    html.Span(ev["t_label"], className="lp-ev-t"),
+                    html.Div([
+                        html.Div(ev["param"],  className="lp-ev-param"),
+                        html.Div(subtitle,     className="lp-ev-subtitle"),
+                    ], className="lp-ev-center"),
+                    html.Span(ev["val_label"], className=val_cls),
+                ],
+            ))
+        children.append(html.Div([
+            html.Div([
+                html.Span("Events", className="lp-group-title"),
+                html.Span(str(len(plotter._events)), className="lp-group-right"),
+            ], className="lp-group-head"),
+            html.Div(
+                className="lp-ev-selbar" + ("" if n_sel else " lp-ev-selbar-empty"),
+                children=[
+                    html.Span([
+                        html.Span(str(n_sel), className="lp-ev-sel-count"),
+                        " Selected",
+                    ], className="lp-ev-selbar-label"),
+                    html.Button("Clear · Esc", id="lp-ev-clear",
+                                className="lp-btn lp-btn-ghost lp-btn-sm", n_clicks=0),
+                ],
+            ),
+            html.Div(rows, className="lp-ev-rows"),
         ]))
 
     return children
@@ -1382,6 +1438,10 @@ class DashPlotter(PlotterBase):
         self._start_time: float | None = None
         self._data_dir: str | None = None
         self._experiment_id: str | None = None
+        self._events: list[dict] = []
+        self._event_selection: list = []
+        self._strip_trace_idx: int | None = None
+        self._param_colors: dict[str, str] = {}
 
         # Poll-version counter — Dash reads these in the refresh() callback
         self._data_version = 0
@@ -1398,6 +1458,10 @@ class DashPlotter(PlotterBase):
         self._last_rail_data = {}
         self._last_sweep_values = {}
         self._start_time = time.time()
+        self._events = []
+        self._event_selection = []
+        self._strip_trace_idx = None
+        self._param_colors = {}
         super().setup(proc)
 
     # ── Rail data caching ──────────────────────────────────────────────
@@ -1413,12 +1477,37 @@ class DashPlotter(PlotterBase):
         super().dispatch(event, index, data, sweep_values)
 
     def update_monitor(self, sample_idx: int, data: dict, timestamp: float) -> None:
-        """Cache readout values for the rail, then route to base."""
+        """Cache readout values for the rail; detect time-unit changes for strip."""
         if self.rail_readouts and data:
             for name in self.rail_readouts:
                 if name in data:
                     self._last_rail_data[name] = data[name]
+        old_unit = self._time_unit_from_state()
         super().update_monitor(sample_idx, data, timestamp)
+        new_unit = self._time_unit_from_state()
+        if (new_unit is not None and new_unit != old_unit
+                and self._strip_trace_idx is not None
+                and self._t0 is not None and self._events):
+            self._rescale_strip_for_unit(new_unit)
+
+    def _time_unit_from_state(self) -> str | None:
+        """Return current time unit from first _time spec's state dict."""
+        for i, spec in enumerate(self.specs):
+            if spec.x == "_time" and i in self._sweep_data:
+                states = self._sweep_data[i]
+                if states:
+                    return states[0].get("_unit")
+        return None
+
+    def _rescale_strip_for_unit(self, unit: str) -> None:
+        """Rescale strip trace x values and _events t_elapsed to the new unit."""
+        divisor = self.unit_divisor(unit)
+        for ev in self._events:
+            ev["t_elapsed"] = (ev["t_abs"] - self._t0) / divisor
+        trace = self._fig_dict["data"][self._strip_trace_idx]
+        trace["x"] = [ev["t_elapsed"] for ev in self._events]
+        if self._event_selection:
+            self._apply_event_selection(self._event_selection)
 
     # ── Theme ──────────────────────────────────────────────────────────
 
@@ -1441,6 +1530,36 @@ class DashPlotter(PlotterBase):
             fig.update_xaxes(**axis_style)
         if y_axis_style:
             fig.update_yaxes(**y_axis_style)
+
+        # Monitor mode: compress data axes into bottom 88 % and add diamond strip
+        is_monitor = not hasattr(self._proc, 'sweeps') or not self._proc.sweeps
+        if is_monitor:
+            import plotly.graph_objects as go
+            for attr_name in dir(fig.layout):
+                if attr_name.startswith("yaxis"):
+                    axis = getattr(fig.layout, attr_name)
+                    if axis.domain:
+                        d = list(axis.domain)
+                        axis.domain = [d[0] * 0.88, d[1] * 0.88]
+            # yaxis indices 1..n_subplots are used by make_subplots; strip gets n+1
+            n_subplots = len(self.specs)
+            strip_num = n_subplots + 1
+            strip_key = f"yaxis{strip_num}"
+            strip_ref = f"y{strip_num}"
+            fig.update_layout(**{strip_key: dict(
+                domain=[0.91, 1.0], visible=False, range=[-0.1, 1.1],
+                anchor="x",
+            )})
+            self._strip_trace_idx = len(fig.data)
+            fig.add_trace(go.Scatter(
+                x=[], y=[], mode="markers",
+                yaxis=strip_ref,
+                marker=dict(symbol="diamond", size=10,
+                            color=[], opacity=[], line=dict(width=0)),
+                customdata=[],
+                hovertemplate="<b>%{customdata[0]}</b>=%{customdata[1]}<br>t=%{customdata[2]}<extra></extra>",
+                showlegend=False, name="_ev_strip",
+            ))
 
     def _retheme_fig_dict(self, theme_name: str) -> None:
         """Apply a new theme to ``_fig_dict`` in-place (no go.Figure needed)."""
@@ -1473,6 +1592,86 @@ class DashPlotter(PlotterBase):
         self._experiment_id = experiment_id
         self._data_version += 1
 
+    def notify_event(self, timestamp: float, param: str, value) -> None:
+        """Record event and update strip marker. No hairlines on the main plot."""
+        if self._fig_dict is None or self._t0 is None:
+            return
+
+        # Keep _event_timestamps in sync so base-class unit-rescaling still works
+        self._event_timestamps.append(timestamp)
+
+        elapsed = timestamp - self._t0
+        x_val, _unit = self.format_elapsed(elapsed)
+        is_toggle = isinstance(value, bool)
+        if is_toggle:
+            val_label = "ON" if value else "OFF"
+        elif isinstance(value, (int, float)):
+            val_label = f"{value:.4g}"
+        else:
+            val_label = str(value)
+        t_label = _format_elapsed_display(elapsed)
+
+        if param not in self._param_colors:
+            self._param_colors[param] = _EV_PALETTE[len(self._param_colors) % len(_EV_PALETTE)]
+        color = self._param_colors[param]
+
+        ev = {
+            "id": len(self._events),
+            "t_abs": timestamp,
+            "t_elapsed": x_val,
+            "param": param,
+            "value": value,
+            "t_label": t_label,
+            "val_label": val_label,
+            "is_toggle": is_toggle,
+            "color": color,
+        }
+        self._events.append(ev)
+
+        if self._strip_trace_idx is not None:
+            trace = self._fig_dict["data"][self._strip_trace_idx]
+            _ml = lambda v: list(v) if isinstance(v, list) else []
+            xs = _ml(trace.get("x")) + [x_val]
+            ys = _ml(trace.get("y")) + [0.5]
+            cd = _ml(trace.get("customdata")) + [[param, val_label, t_label]]
+            colors = _ml(trace.get("marker", {}).get("color")) + [color]
+            sizes = _ml(trace.get("marker", {}).get("size")) + [10]
+            opacities = _ml(trace.get("marker", {}).get("opacity")) + [0.55]
+            trace["x"] = xs
+            trace["y"] = ys
+            trace["customdata"] = cd
+            trace["marker"] = {**trace.get("marker", {}),
+                               "color": colors, "size": sizes, "opacity": opacities}
+        self.on_data_changed()
+
+    def _apply_event_selection(self, selected_ids: list) -> None:
+        """Update strip marker sizes/opacities and vertical guide shapes."""
+        if self._fig_dict is None or self._strip_trace_idx is None:
+            return
+        selected_set = set(selected_ids)
+
+        trace = self._fig_dict["data"][self._strip_trace_idx]
+        n = len(trace.get("x") or [])
+        sizes =     [13 if self._events[i]["id"] in selected_set else 10  for i in range(n)]
+        opacities = [1.0 if self._events[i]["id"] in selected_set else 0.55 for i in range(n)]
+        trace["marker"] = {**trace.get("marker", {}), "size": sizes, "opacity": opacities}
+
+        layout = self._fig_dict["layout"]
+        shapes = [s for s in layout.get("shapes", []) if not s.get("_ev_guide")]
+        for ev in self._events:
+            if ev["id"] not in selected_set:
+                continue
+            shapes.append({
+                "_ev_guide": True,
+                "type": "line", "xref": "x", "yref": "paper",
+                "x0": ev["t_elapsed"], "x1": ev["t_elapsed"],
+                "y0": 0.0, "y1": 0.88,
+                "line": {"color": self.event_line.color, "width": 1},
+                "opacity": 0.6,
+            })
+        layout["shapes"] = shapes
+        self._data_version += 1
+
     # ── PlotterBase interface ──────────────────────────────────────────
 
     def on_data_changed(self) -> None:
@@ -1487,8 +1686,8 @@ class DashPlotter(PlotterBase):
     def _start_server(self) -> None:
         """Launch Dash app on a background daemon thread."""
         import logging
-        from dash import Dash, dcc, html, no_update
-        from dash.dependencies import Input, Output, State
+        from dash import Dash, dcc, html, no_update, ctx
+        from dash.dependencies import Input, Output, State, ALL
 
         for logger_name in ("werkzeug", "dash", "dash.dash", "flask", "flask.app"):
             logging.getLogger(logger_name).setLevel(logging.ERROR)
@@ -1498,6 +1697,7 @@ class DashPlotter(PlotterBase):
             __name__,
             update_title=None,
             assets_folder=assets_dir,
+            suppress_callback_exceptions=True,
             external_scripts=[
                 "https://html2canvas.hertzen.com/dist/html2canvas.min.js"
             ],
@@ -1550,6 +1750,10 @@ class DashPlotter(PlotterBase):
                     dcc.Interval(id="interval", interval=plotter.update_interval,
                                  n_intervals=0),
                     html.Div(id="lp-snap-dummy", style={"display": "none"}),
+                    dcc.Store(id="lp-ev-selected", data=[]),
+                    dcc.Store(id="lp-ev-anchor",   data=None),
+                    dcc.Store(id="lp-ev-mods",     data={"shift": False, "ctrl": False}),
+                    dcc.Store(id="lp-ev-kbd-init", data=""),
                 ],
             )
 
@@ -1650,6 +1854,120 @@ class DashPlotter(PlotterBase):
             Input("lp-snapshot", "n_clicks"),
             prevent_initial_call=True,
         )
+
+        # ── Keyboard init + modifier tracking ─────────────────────────
+        app.clientside_callback(
+            """
+            function(_) {
+                if (window.__lp_ev_inited) return window.dash_clientside.no_update;
+                window.__lp_ev_inited = true;
+                window.__lp_mods = {shift: false, ctrl: false};
+                var upd = function(e) {
+                    window.__lp_mods.shift = e.shiftKey;
+                    window.__lp_mods.ctrl  = e.ctrlKey || e.metaKey;
+                };
+                document.addEventListener('keydown', upd);
+                document.addEventListener('keyup',   upd);
+                document.addEventListener('keydown', function(e) {
+                    if (e.key !== 'Escape') return;
+                    var ae = document.activeElement;
+                    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
+                    var btn = document.getElementById('lp-ev-clear');
+                    if (btn) btn.click();
+                });
+                return '';
+            }
+            """,
+            Output("lp-ev-kbd-init", "data"),
+            Input("lp-ev-kbd-init", "data"),
+        )
+
+        app.clientside_callback(
+            """
+            function(clickData, rowClicks) {
+                var m = window.__lp_mods || {shift: false, ctrl: false};
+                return {shift: !!m.shift, ctrl: !!m.ctrl};
+            }
+            """,
+            Output("lp-ev-mods", "data"),
+            Input("live-graph", "clickData"),
+            Input({"type": "lp-ev-row", "id": ALL}, "n_clicks"),
+        )
+
+        # ── Event selection ────────────────────────────────────────────
+        @app.callback(
+            Output("lp-ev-selected", "data"),
+            Output("lp-ev-anchor",   "data"),
+            Input("live-graph", "clickData"),
+            Input({"type": "lp-ev-row", "id": ALL}, "n_clicks"),
+            Input("lp-ev-clear", "n_clicks"),
+            State("lp-ev-selected", "data"),
+            State("lp-ev-anchor",   "data"),
+            State("lp-ev-mods",     "data"),
+            prevent_initial_call=True,
+        )
+        def _update_ev_selection(click_data, row_clicks, clear_n, selected, anchor, mods):
+            trig = ctx.triggered_id
+            if trig == "lp-ev-clear" and (clear_n or 0) > 0:
+                plotter._event_selection = []
+                plotter._apply_event_selection([])
+                return [], None
+
+            selected = list(selected or [])
+            shift = bool((mods or {}).get("shift"))
+            ctrl  = bool((mods or {}).get("ctrl"))
+
+            clicked_id = None
+            if trig == "live-graph" and click_data:
+                for pt in click_data.get("points", []):
+                    if pt.get("curveNumber") == plotter._strip_trace_idx:
+                        x_clicked = pt.get("x")
+                        for ev in plotter._events:
+                            if abs(ev["t_elapsed"] - x_clicked) < 1e-9:
+                                clicked_id = ev["id"]
+                                break
+            elif isinstance(trig, dict) and trig.get("type") == "lp-ev-row":
+                if row_clicks is None or all((c or 0) == 0 for c in row_clicks):
+                    return no_update, no_update
+                clicked_id = trig.get("id")
+
+            if clicked_id is None:
+                return no_update, no_update
+
+            if shift and anchor is not None and anchor != clicked_id and isinstance(trig, dict):
+                ids = [e["id"] for e in plotter._events]
+                try:
+                    ii, jj = ids.index(anchor), ids.index(clicked_id)
+                except ValueError:
+                    ii, jj = -1, -1
+                if ii >= 0 and jj >= 0:
+                    lo, hi = min(ii, jj), max(ii, jj)
+                    rng = ids[lo:hi + 1]
+                    seen = set(selected); merged = list(selected)
+                    for r in rng:
+                        if r not in seen:
+                            merged.append(r); seen.add(r)
+                    plotter._event_selection = merged
+                    plotter._apply_event_selection(merged)
+                    return merged, clicked_id
+
+            if clicked_id in selected:
+                new_sel = [x for x in selected if x != clicked_id]
+            else:
+                new_sel = selected + [clicked_id]
+            plotter._event_selection = new_sel
+            plotter._apply_event_selection(new_sel)
+            return new_sel, clicked_id
+
+        @app.callback(
+            Output("live-graph", "figure", allow_duplicate=True),
+            Input("lp-ev-selected", "data"),
+            prevent_initial_call=True,
+        )
+        def _ev_selection_to_figure(selected):
+            # Sync version so refresh doesn't overwrite this update on next tick
+            plotter._last_sent_version = plotter._data_version
+            return plotter._fig_dict or no_update
 
         # Suppress the Flask "Serving Flask app" CLI banner
         try:
