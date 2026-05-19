@@ -147,22 +147,33 @@ class _NullWriter:
     def write_metadata(self, *a, **kw): pass
 
 
+class _StopRequested(Exception):
+    """Raised internally when runner.stop() is called mid-sweep."""
+
+
 class WriteStrategy(abc.ABC):
     """Base class for sweep execution strategies.
 
     Holds shared state and helpers used by all write modes.
     """
 
-    def __init__(self, proc: Procedure, writer: ZarrWriter, pbar, plotter=None):
+    def __init__(self, proc: Procedure, writer: ZarrWriter, pbar, plotter=None,
+                 stop_event: threading.Event | None = None):
         self.proc = proc
         self.writer = writer
         self.pbar = pbar
         self.plotter = plotter
+        self._stop_event = stop_event
         # Track the last-set index and reversal flag per axis so that
         # _sweep_current_values() can read values from arrays instead of
         # querying instruments (which may be slow GPIB/USB round-trips).
         self._current_indices: dict[int, int] = {}
         self._current_reversed_map: dict[int, bool] = {}
+
+    def _check_stop(self) -> None:
+        """Raise _StopRequested if runner.stop() was called."""
+        if self._stop_event is not None and self._stop_event.is_set():
+            raise _StopRequested
 
     @abc.abstractmethod
     async def execute(self) -> None:
@@ -362,6 +373,7 @@ class PointwiseStrategy(WriteStrategy):
             await _acall_hook(self.proc.after_point, index)
             if self.pbar:
                 self.pbar.update(1)
+            self._check_stop()
             return
 
         await self._outer_loop(axis, index, self._loop)
@@ -410,6 +422,7 @@ class SweepwiseStrategy(WriteStrategy):
             await _acall_hook(self.proc.after_point, full_index)
             if self.pbar:
                 self.pbar.update(1)
+            self._check_stop()
 
         self.writer.write_trace(outer_index, buffers)
         self._notify_plotter_sweep(outer_index, buffers, sweep)
@@ -471,6 +484,7 @@ class PlanewiseStrategy(WriteStrategy):
                 await _acall_hook(self.proc.after_point, full_index)
                 if self.pbar:
                     self.pbar.update(1)
+                self._check_stop()
 
             # Notify plotter after each completed row
             row_data = {rname: buffers[rname][i, :] for rname in self.proc.readouts}
@@ -507,6 +521,7 @@ class AllStrategy(WriteStrategy):
             await _acall_hook(self.proc.after_point, index)
             if self.pbar:
                 self.pbar.update(1)
+            self._check_stop()
             return
 
         sweep = self.proc.sweeps[axis]
@@ -551,6 +566,7 @@ class ExperimentRunner:
 
     def __init__(self, use_experiment_id: bool = True):
         self.use_experiment_id = use_experiment_id
+        self._sweep_stop   = threading.Event()
         self._monitor_stop = threading.Event()
         self._monitor_thread: threading.Thread | None = None
         self._monitor_result: Path | None = None
@@ -687,6 +703,7 @@ class ExperimentRunner:
         if print_summary:
             proc.summary()
 
+        self._sweep_stop.clear()
         self._validate_virtual_readouts(proc)
         self._reset_limit_logs(proc)
 
@@ -715,6 +732,8 @@ class ExperimentRunner:
             if hasattr(plotter, '_mark_start'):
                 plotter._mark_start()          # reset timer to actual experiment start
             plotter.set_run_info(data_dir)
+            if hasattr(plotter, 'set_stop_callback'):
+                plotter.set_stop_callback(self.stop)
 
         total_points = 1
         for s in proc.sweeps:
@@ -731,10 +750,14 @@ class ExperimentRunner:
         await _acall_hook(proc.before_experiment)
 
         strategy_cls = _STRATEGY_MAP.get(proc.write_mode, PointwiseStrategy)
-        strategy = strategy_cls(proc, writer, pbar, plotter)
+        strategy = strategy_cls(proc, writer, pbar, plotter,
+                                stop_event=self._sweep_stop)
 
+        stopped_early = False
         try:
             await strategy.execute()
+        except _StopRequested:
+            stopped_early = True
         except (KeyboardInterrupt, asyncio.CancelledError):
             # Let it propagate — run() handles cleanup via _handle_interrupt()
             raise
@@ -750,8 +773,9 @@ class ExperimentRunner:
         if pbar:
             pbar.close()
 
+        status = "stopped" if stopped_early else "completed"
         if not no_save:
-            meta = {**proc.bench.metadata, **proc.metadata, "status": "completed"}
+            meta = {**proc.bench.metadata, **proc.metadata, "status": status}
             writer.overwrite = True
             writer.write_metadata(meta=meta)
 
@@ -765,11 +789,24 @@ class ExperimentRunner:
             if not no_save and save_plot and hasattr(plotter, 'save'):
                 plotter.save(data_dir)
 
+        verb = "stopped" if stopped_early else "completed"
         if no_save:
-            print(f"Experiment '{proc.name}' completed. No data saved.")
+            print(f"Experiment '{proc.name}' {verb}. No data saved.")
         else:
-            print(f"Experiment '{proc.name}' completed. Data saved to: {data_dir}")
+            print(f"Experiment '{proc.name}' {verb}. Data saved to: {data_dir}")
         return data_dir
+
+    def stop(self) -> None:
+        """Stop a running sweep after the current measurement point completes.
+
+        Safe to call from a separate thread or (in background-monitor mode)
+        from the next notebook cell.  Data collected so far is saved normally
+        and the plotter is finalized — identical to the experiment finishing
+        naturally, but with ``status: "stopped"`` in the metadata.
+
+        Has no effect if no sweep is currently running.
+        """
+        self._sweep_stop.set()
 
     # ── Monitor mode ──────────────────────────────────────────────────
 
