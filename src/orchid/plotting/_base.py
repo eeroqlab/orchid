@@ -360,19 +360,20 @@ class PlotterBase(abc.ABC):
             if not isinstance(spec.x, str) or spec.x != "_time":
                 continue
 
-            xref = "x" if i == 0 else f"x{i + 1}"
-            y_axis_key = "yaxis" if i == 0 else f"yaxis{i + 1}"
-            domain = layout.get(y_axis_key, {}).get("domain", [0.0, 1.0])
-            y0, y1 = domain[0], domain[1]
+            xref  = "x" if i == 0 else f"x{i + 1}"
+            yaxis = "y" if i == 0 else f"y{i + 1}"
+            # "y domain" / "y2 domain" pins coordinates to [0,1] within that
+            # subplot only — no bleed into adjacent subplots or gaps.
+            yref  = f"{yaxis} domain"
 
             layout["shapes"].append({
                 "type": "line",
                 "xref": xref,
-                "yref": "paper",
+                "yref": yref,
                 "x0": x_val,
                 "x1": x_val,
-                "y0": y0,
-                "y1": y1,
+                "y0": 0,
+                "y1": 1,
                 "line": {
                     "color": self.event_line.color,
                     "width": self.event_line.width,
@@ -381,9 +382,9 @@ class PlotterBase(abc.ABC):
             })
             layout["annotations"].append({
                 "xref": xref,
-                "yref": "paper",
+                "yref": yref,
                 "x": x_val,
-                "y": (y0 + y1) / 2,
+                "y": 0.5,
                 "text": label,
                 "showarrow": False,
                 "textangle": -90,
@@ -434,7 +435,7 @@ class PlotterBase(abc.ABC):
         fig = make_subplots(
             rows=n, cols=1,
             specs=[[st] for st in subplot_types],
-            vertical_spacing=0.08 if n > 1 else 0.0,
+            vertical_spacing=0.12 if n > 1 else 0.0,
         )
         fig.update_layout(height=self.height_per_plot * n, width=self.width)
 

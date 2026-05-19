@@ -785,14 +785,21 @@ class DashPlotter(PlotterBase):
         for ev in self._events:
             if ev["id"] not in selected_set:
                 continue
-            shapes.append({
-                "_ev_guide": True,
-                "type": "line", "xref": "x", "yref": "paper",
-                "x0": ev["t_elapsed"], "x1": ev["t_elapsed"],
-                "y0": 0.0, "y1": 0.88,
-                "line": {"color": self.event_line.color, "width": 1},
-                "opacity": 0.6,
-            })
+            # Draw one guide per _time subplot, each confined to its own axis.
+            for i, spec in enumerate(self.specs):
+                if not isinstance(spec.x, str) or spec.x != "_time":
+                    continue
+                xref  = "x" if i == 0 else f"x{i + 1}"
+                yaxis = "y" if i == 0 else f"y{i + 1}"
+                shapes.append({
+                    "_ev_guide": True,
+                    "type": "line",
+                    "xref": xref, "yref": f"{yaxis} domain",
+                    "x0": ev["t_elapsed"], "x1": ev["t_elapsed"],
+                    "y0": 0.0, "y1": 1.0,
+                    "line": {"color": ev["color"], "width": 1.5},
+                    "opacity": 0.6,
+                })
         layout["shapes"] = shapes
         self._data_version += 1
 
