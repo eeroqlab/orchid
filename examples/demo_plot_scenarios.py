@@ -82,12 +82,7 @@ def vnoise(n, sigma=0.5):
 # ══════════════════════════════════════════════════════════════════════
 
 class DemoPlotter(DashPlotter):
-    """Freezes instead of closing after the runner finishes."""
-
-    def stop(self, _silent=False):
-        self.finalize()             # pause live updates, keep server alive
-        if not _silent:
-            print("  [plot frozen — press Enter in the terminal to close]")
+    """Thin subclass that keeps the server alive for interactive inspection."""
 
     def really_stop(self):
         super().stop()

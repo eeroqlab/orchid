@@ -195,6 +195,36 @@ class PlotSpec:
     update_func: Callable | None = None
     colorscale: str | list | None = None  # heatmap / trace_heatmap only
 
+    def to_dict(self) -> dict:
+        """Serialise to a plain dict suitable for YAML / JSON.
+
+        ``update_func`` is not serialisable and is silently dropped.
+        numpy arrays for ``x`` / ``y`` are converted to plain Python lists.
+        ``None`` values are omitted to keep the output readable.
+        """
+        def _cv(v):
+            if isinstance(v, np.ndarray):
+                return v.tolist()
+            return v
+
+        d = {
+            "x": _cv(self.x),
+            "y": _cv(self.y) if not isinstance(self.y, list)
+                 else [_cv(e) for e in self.y],
+        }
+        for field in ("z", "y_col", "z_col", "colorscale", "update_every"):
+            val = getattr(self, field)
+            if val is not None:
+                d[field] = val
+        if self.plot_type != "auto":
+            d["plot_type"] = self.plot_type
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PlotSpec":
+        """Reconstruct a :class:`PlotSpec` from a plain dict."""
+        return cls(**d)
+
 
 def _y_list(spec: PlotSpec) -> list[str]:
     """Normalise PlotSpec.y to a list of readout name strings.

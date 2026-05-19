@@ -76,6 +76,7 @@ class PlotterBase(abc.ABC):
         self._sweep_data: dict[int, dict] = {}
         self._trace_offsets: list[int] = []
         self._stopped = False
+        self._final_elapsed: str | None = None
         self._t0: float | None = None
         self._event_timestamps: list[float] = []
 
@@ -129,6 +130,7 @@ class PlotterBase(abc.ABC):
         self._sweep_data = {}
         self._trace_offsets = []
         self._stopped = False
+        self._final_elapsed = None
         self._t0 = None
         self._event_timestamps = []
 

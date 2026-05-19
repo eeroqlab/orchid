@@ -316,6 +316,22 @@ body {
 .lp-btn-primary:hover { filter: brightness(1.05); }
 .lp-btn-ghost { color: var(--ink-mute); }
 
+/* Stop button */
+.lp-btn-stop {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.lp-btn-stop:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.lp-btn-stop-done {
+  border-color: var(--hairline);
+  color: var(--ink-faint);
+  cursor: default;
+}
+.lp-btn-stop-done:hover { border-color: var(--hairline); }
+
 /* ───────────────────── Appearance menu ─────────────────────────── */
 .lp-appearance { position: relative; }
 .lp-appearance > summary {
