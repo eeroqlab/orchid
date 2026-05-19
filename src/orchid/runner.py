@@ -566,7 +566,8 @@ class ExperimentRunner:
 
     def run(self, procedure: Procedure, plotter=None,
             print_summary: bool = False,
-            return_path: bool = False) -> Path | None:
+            return_path: bool = False,
+            save_plot: bool = True) -> Path | None:
         """Run a sweep experiment synchronously.
 
         Works both from scripts (no event loop) and from Jupyter
@@ -586,6 +587,10 @@ class ExperimentRunner:
         return_path : bool
             If True, return the Path to the saved data directory.
             Default is False (returns None).
+        save_plot : bool
+            If True (default), call ``plotter.save()`` at the end of the run
+            so the figure can be reloaded with ``DashPlotter.load()``.
+            Set to False to skip saving the figure (e.g. during quick tests).
 
         Returns
         -------
@@ -600,7 +605,8 @@ class ExperimentRunner:
         }
         try:
             result = _run_coro(self.arun(procedure, plotter=plotter,
-                                         print_summary=print_summary))
+                                         print_summary=print_summary,
+                                         save_plot=save_plot))
         except (KeyboardInterrupt, asyncio.CancelledError):
             result = self._handle_interrupt()
 
@@ -670,7 +676,8 @@ class ExperimentRunner:
                     )
 
     async def arun(self, proc: Procedure, plotter=None,
-                   print_summary: bool = False) -> Path:
+                   print_summary: bool = False,
+                   save_plot: bool = True) -> Path:
         """Run a sweep experiment asynchronously."""
         try:
             from tqdm import tqdm
@@ -702,7 +709,11 @@ class ExperimentRunner:
             )
 
         if plotter is not None:
-            plotter.setup(proc)
+            if not getattr(plotter, '_prepared', False):
+                plotter.setup(proc)
+            plotter._prepared = False          # consume the flag
+            if hasattr(plotter, '_mark_start'):
+                plotter._mark_start()          # reset timer to actual experiment start
             plotter.set_run_info(data_dir)
 
         total_points = 1
@@ -750,7 +761,9 @@ class ExperimentRunner:
             self._save_limit_log(proc, data_dir)
 
         if plotter is not None:
-            plotter.stop()
+            plotter.finalize()
+            if not no_save and save_plot and hasattr(plotter, 'save'):
+                plotter.save(data_dir)
 
         if no_save:
             print(f"Experiment '{proc.name}' completed. No data saved.")
@@ -763,7 +776,8 @@ class ExperimentRunner:
     def run_monitor(self, procedure: MonitorProcedure, plotter=None,
                      background: bool = False,
                      print_summary: bool = False,
-                     return_path: bool = False) -> Path | None:
+                     return_path: bool = False,
+                     save_plot: bool = True) -> Path | None:
         """Run time-series monitoring.
 
         Parameters
@@ -782,6 +796,10 @@ class ExperimentRunner:
         return_path : bool
             If True, return the Path to the saved data directory.
             Default is False (returns None).
+        save_plot : bool
+            If True (default), call ``plotter.save()`` at the end of the run
+            so the figure can be reloaded with ``DashPlotter.load()``.
+            Set to False to skip saving the figure.
 
         Returns
         -------
@@ -800,7 +818,8 @@ class ExperimentRunner:
         }
         try:
             result = _run_coro(self.arun_monitor(procedure, plotter=plotter,
-                                                  print_summary=print_summary))
+                                                  print_summary=print_summary,
+                                                  save_plot=save_plot))
         except (KeyboardInterrupt, asyncio.CancelledError):
             result = self._handle_interrupt()
 
@@ -847,7 +866,7 @@ class ExperimentRunner:
             self._monitor_thread.join(timeout=10)
             self._monitor_thread = None
         if self._monitor_plotter is not None:
-            self._monitor_plotter.stop(_silent=True)
+            self._monitor_plotter.finalize()
             self._monitor_plotter = None
         result = self._monitor_result
         if result:
@@ -855,7 +874,8 @@ class ExperimentRunner:
         return result
 
     async def arun_monitor(self, proc: MonitorProcedure, plotter=None,
-                           print_summary: bool = False) -> Path:
+                           print_summary: bool = False,
+                           save_plot: bool = True) -> Path:
         """Run time-series monitoring asynchronously."""
         if print_summary:
             proc.summary()
@@ -886,8 +906,15 @@ class ExperimentRunner:
         )
 
         if plotter is not None:
-            plotter.setup(proc)
+            if not getattr(plotter, '_prepared', False):
+                plotter.setup(proc)
+            plotter._prepared = False          # consume the flag
+            if hasattr(plotter, '_mark_start'):
+                plotter._mark_start()          # reset timer to actual experiment start
             plotter.set_run_info(data_dir)
+            # Wire the Stop button in the browser to halt the monitor loop
+            if hasattr(plotter, 'set_stop_callback'):
+                plotter.set_stop_callback(lambda: self._monitor_stop.set())
 
         # Populate run state so interrupt handler can print the data path
         if hasattr(self, "_run_state"):
@@ -986,6 +1013,8 @@ class ExperimentRunner:
 
         if plotter is not None:
             plotter.finalize()
+            if save_plot and hasattr(plotter, 'save'):
+                plotter.save(data_dir)
 
         if interrupted:
             print(f"\nMonitor '{proc.name}' stopped by user after {sample_idx} samples. Data saved to: {data_dir}")

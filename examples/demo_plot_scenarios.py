@@ -4,7 +4,7 @@ Usage
 -----
     /Users/helium/miniconda3/envs/fem/bin/python examples/demo_plot_scenarios.py <N>
 
-where N is a scenario number 1–16 (or "list" to print the menu).
+where N is a scenario number 1–18 (or "list" to print the menu).
 
 Each demo opens a browser tab at http://localhost:8050, runs a short
 simulated experiment, then freezes the final plot until you press Enter.
@@ -27,18 +27,21 @@ Scenarios
 14  Monitor     / TRACE    / live_trace in monitor        — refreshing spectrum
 15  Monitor     / IMAGE    / live_trace y_col in monitor  — VNA image, mag channel
 16  Monitor     / SCALAR×2 / readout vs readout           — lock-in IQ semi-circle
+17  PostResult  / show_analysis overlay                   — fit curve, peak, FWHM box
+18  Monitor     / SCALAR×3   / event logging              — Vgt steps + RF toggle, 3 subplots
 """
 
 import sys
 import time
 import tempfile
+import threading
 import webbrowser
 
 import numpy as np
 
 sys.path.insert(0, "src")
 
-from orchid import Bench, ExperimentRunner
+from orchid import Bench, ExperimentRunner, PostResult
 from orchid.controller import DataKind
 from orchid.procedure import Procedure, MonitorProcedure, Sweep, WriteMode
 from orchid.plotting import PlotSpec, DashPlotter
@@ -79,12 +82,7 @@ def vnoise(n, sigma=0.5):
 # ══════════════════════════════════════════════════════════════════════
 
 class DemoPlotter(DashPlotter):
-    """Freezes instead of closing after the runner finishes."""
-
-    def stop(self, _silent=False):
-        self.finalize()             # pause live updates, keep server alive
-        if not _silent:
-            print("  [plot frozen — press Enter in the terminal to close]")
+    """Thin subclass that keeps the server alive for interactive inspection."""
 
     def really_stop(self):
         super().stop()
@@ -671,6 +669,213 @@ def scenario_16():
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  Scenario 17 — show_analysis / PostResult overlay
+#  Runs the same Lorentzian sweep as scenario 1, then overlays a clean
+#  fit curve, marks the peak with a vline and a point, draws the FWHM
+#  box, and shows a summary in the rail panel.
+# ══════════════════════════════════════════════════════════════════════
+
+def scenario_17():
+    """1D sweep → Lorentzian peak, then show_analysis overlays fit results."""
+    bench, state, _ = _make_bench()
+
+    # True peak parameters (experiment doesn't know these — analysis recovers them)
+    TRUE_X0    = -0.4
+    TRUE_WIDTH = 0.08
+    TRUE_AMP   = 1.0
+
+    bench.add_controller("Vgt",
+        set_func=lambda v: state.__setitem__("Vgt", v),
+        get_func=lambda: state["Vgt"],
+        unit="V")
+
+    bench.add_readout("signal", kind=DataKind.SCALAR,
+        get_func=lambda: lorentzian(state["Vgt"],
+                                    x0=TRUE_X0, width=TRUE_WIDTH, amp=TRUE_AMP)
+                         + noise(0.03))
+
+    vgt_vals = np.linspace(-1.0, 0.0, 61)
+
+    proc = Procedure(
+        name="s17_show_analysis",
+        bench=bench,
+        sweeps=[Sweep("Vgt", vgt_vals)],
+        readouts=["signal"],
+        settle_time=0.03,
+    )
+    plotter = _make_plotter(PlotSpec(x="Vgt", y="signal"))
+
+    print("\nScenario 17: 1D SCALAR sweep → Lorentzian peak")
+    print("  After the sweep a fake 'analysis' overlays the fit result.")
+
+    # Run the experiment
+    runner = ExperimentRunner(use_experiment_id=False)
+    runner.run(proc, plotter=plotter)
+
+    # ── Fake post-experiment analysis ─────────────────────────────────
+    # In a real workflow this would be:
+    #   result = my_analysis_process(data_dir)
+    # Here we just use the known true parameters + a small recovered offset
+    # to simulate what a Lorentzian fit would return.
+    print("  Running analysis…")
+    time.sleep(0.5)   # simulate analysis computation time
+
+    fit_x0    = TRUE_X0    + float(RNG.normal(0, 0.005))   # small recovery error
+    fit_width = TRUE_WIDTH + float(RNG.normal(0, 0.003))
+    fit_amp   = TRUE_AMP   + float(RNG.normal(0, 0.01))
+
+    fit_x   = np.linspace(vgt_vals[0], vgt_vals[-1], 300)
+    fit_y   = lorentzian(fit_x, x0=fit_x0, width=fit_width, amp=fit_amp)
+    peak_y  = fit_amp
+    half_y  = fit_amp / 2.0
+    fwhm    = 2.0 * fit_width                   # FWHM of a Lorentzian = 2 × half-width
+    r_sq    = 1.0 - float(RNG.uniform(0.0, 0.008))   # plausible R²
+
+    plotter.show_analysis([
+        PostResult(
+            name="Lorentzian Fit",
+            subplot=0,
+            # Smooth fit curve overlaid on the noisy data
+            traces=[{
+                "x":    fit_x,
+                "y":    fit_y,
+                "name": "fit",
+                "dash": "solid",
+                "width": 2,
+            }],
+            # Vertical line at the recovered peak position
+            vlines=[{"name": "peak", "x": fit_x0}],
+            # Horizontal line at the half-maximum level
+            hlines=[{"name": "½ max", "y": half_y}],
+            # Scatter point at the peak
+            points=[{"name": "peak", "x": fit_x0, "y": peak_y}],
+            # Shaded FWHM region
+            boxes=[{
+                "name": "FWHM",
+                "x0": fit_x0 - fit_width,
+                "x1": fit_x0 + fit_width,
+                "y0": 0.0,
+                "y1": half_y,
+            }],
+            railpanel={
+                "peak x":  round(fit_x0,    4),
+                "FWHM":    round(fwhm,       4),
+                "peak amp": round(fit_amp,   4),
+                "R²":      round(r_sq,       4),
+            },
+        ),
+    ])
+    print(f"  Analysis done — peak at x={fit_x0:.4f}, FWHM={fwhm:.4f}, R²={r_sq:.4f}")
+
+    _wait_and_close(plotter)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Scenario 18 — Monitor / SCALAR×3 / event logging
+#  Three live signals respond visibly to Vgt steps and RF on/off toggles.
+#  A background thread fires bench parameter changes — each triggers a
+#  diamond marker in the event strip above the plot and a log entry in
+#  the rail sidebar.
+# ══════════════════════════════════════════════════════════════════════
+
+def scenario_18():
+    """Monitor with 3 subplots + event logging: Vgt steps and RF toggle."""
+    bench, _, data_dir = _make_bench()
+
+    # ── Instrument state ─────────────────────────────────────────────
+    ev_state = {
+        "Vgt":   0.0,   # gate voltage (shifts Lorentzian centre)
+        "rf_on": False, # RF power switch (scales lock-in amplitude)
+        "T":     0.0,   # temperature accumulator
+    }
+
+    # ── Controllers ───────────────────────────────────────────────────
+    bench.add_controller(
+        "Vgt",
+        set_func=lambda v: ev_state.__setitem__("Vgt", v),
+        get_func=lambda:   ev_state["Vgt"],
+        unit="V",
+    )
+    bench.add_controller(
+        "rf_on",
+        set_func=lambda v: ev_state.__setitem__("rf_on", bool(v)),
+        get_func=lambda:   ev_state["rf_on"],
+    )
+
+    # ── Readouts ──────────────────────────────────────────────────────
+    # lockin_X: Lorentzian centred at Vgt, amplitude boosted when RF on
+    def _read_lockin_x():
+        vgt   = ev_state["Vgt"]
+        rf_gain = 2.5 if ev_state["rf_on"] else 1.0
+        return rf_gain * lorentzian(vgt, x0=0.0, width=0.25, amp=1.0) + noise(0.03)
+
+    # lockin_Y: slow sinusoidal drift; RF shifts the phase
+    def _read_lockin_y():
+        t = time.time()
+        phase = 1.2 if ev_state["rf_on"] else 0.0
+        return 0.4 * np.sin(0.4 * t + phase) + noise(0.02)
+
+    # temperature: slow monotonic drift, independent of parameters
+    def _read_temperature():
+        ev_state["T"] += float(RNG.normal(0.004, 0.001))
+        return 300.0 + ev_state["T"] + noise(0.05)
+
+    bench.add_readout("lockin_X",    get_func=_read_lockin_x,    unit="V",  kind=DataKind.SCALAR)
+    bench.add_readout("lockin_Y",    get_func=_read_lockin_y,    unit="V",  kind=DataKind.SCALAR)
+    bench.add_readout("temperature", get_func=_read_temperature, unit="mK", kind=DataKind.SCALAR)
+
+    # ── Procedure ─────────────────────────────────────────────────────
+    proc = MonitorProcedure(
+        name="s18_event_logging",
+        bench=bench,
+        readouts=["lockin_X", "lockin_Y", "temperature"],
+        interval=0.15,
+        duration=28.0,
+    )
+
+    # ── Plotter: 3 subplots ───────────────────────────────────────────
+    plotter = _make_plotter(
+        PlotSpec(x="_time", y="lockin_X"),
+        PlotSpec(x="_time", y="lockin_Y"),
+        PlotSpec(x="_time", y="temperature"),
+        port=8050,
+    )
+
+    # ── Background thread: fire events at fixed times ─────────────────
+    # Each bench parameter assignment triggers plotter.notify_event()
+    # → diamond in the event strip + row in the event log rail.
+    EVENTS = [
+        (4.0,  "Vgt",   0.30,  "gate step → +0.30 V"),
+        (9.0,  "rf_on", True,  "RF power ON"),
+        (14.0, "Vgt",  -0.50,  "gate step → -0.50 V"),
+        (19.0, "rf_on", False, "RF power OFF"),
+        (23.0, "Vgt",   0.00,  "gate reset → 0.00 V"),
+    ]
+
+    def _fire_events():
+        t0 = time.time()
+        for delay, param, value, msg in EVENTS:
+            remaining = delay - (time.time() - t0)
+            if remaining > 0:
+                time.sleep(remaining)
+            bench[param] = value
+            print(f"  [event] t={time.time()-t0:.1f}s  {param} = {value!r}  ({msg})")
+
+    evt_thread = threading.Thread(target=_fire_events, daemon=True)
+
+    print("\nScenario 18: Monitor / SCALAR×3 / Event Logging")
+    print("  3 subplots — lockin_X, lockin_Y, temperature")
+    print("  Watch the event strip above the plot as Vgt steps and RF toggles fire.")
+    print("  Click a diamond marker or a rail log entry to select events.\n")
+
+    # Start the event thread once the runner is launched
+    runner = ExperimentRunner(use_experiment_id=False)
+    evt_thread.start()
+    runner.run_monitor(proc, plotter=plotter)
+    _wait_and_close(plotter)
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  Dispatch table and CLI
 # ══════════════════════════════════════════════════════════════════════
 
@@ -691,6 +896,8 @@ SCENARIOS = {
     14: (scenario_14, "Monitor     / TRACE    / live_trace drifting spectrum"),
     15: (scenario_15, "Monitor     / IMAGE    / live_trace y_col='mag'"),
     16: (scenario_16, "Monitor     / SCALAR×2 / readout vs readout (IQ semi-circle)"),
+    17: (scenario_17, "PostResult  / show_analysis — fit curve, peak, FWHM box"),
+    18: (scenario_18, "Monitor     / SCALAR×3   / event logging — Vgt steps + RF toggle"),
 }
 
 

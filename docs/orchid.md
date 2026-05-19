@@ -28,6 +28,7 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [Controller Limits](#controller-limits)
   - [Virtual Controllers](#virtual-controllers)
   - [Controller Event Logging](#controller-event-logging)
+  - [Post-Experiment Analysis Overlay](#post-experiment-analysis-overlay)
   - [Background Monitoring](#background-monitoring)
   - [Custom Hooks](#custom-hooks)
   - [Mixed Readouts (Scalar + Trace)](#mixed-readouts-scalar--trace)
@@ -47,10 +48,10 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [Procedure](#procedure)
   - [MonitorProcedure](#monitorprocedure)
   - [EventLineConfig](#eventlineconfig)
+  - [PostResult](#postresult)
   - [PlotSpec](#plotspec)
   - [PlotterBase](#plotterbase)
   - [DashPlotter / LivePlotter](#dashplotter--liveplotter)
-  - [TaipyPlotter](#taipyplotter)
   - [ControlPanel](#controlpanel)
   - [WriteMode](#writemode)
   - [ErrorPolicy](#errorpolicy)
@@ -843,7 +844,7 @@ print(meta["T_mc"])       # 0.015
 
 Orchid provides built-in live plotting using a Dash server that opens in a **separate browser window**. The plots update in real time as data is acquired. Create a `DashPlotter` (or its alias `LivePlotter`) with one or more `PlotSpec` objects and pass it to the runner.
 
-The plotter architecture separates data logic from the display backend: `PlotterBase` holds all figure-building and data-update code; `DashPlotter` adds the Dash/Werkzeug server on top. A `TaipyPlotter` backend is also available for push-based (no-polling) updates.
+The plotter architecture separates data logic from the display backend: `PlotterBase` holds all figure-building and data-update code; `DashPlotter` adds the Dash/Werkzeug server on top.
 
 #### Scenarios at a glance
 
@@ -1169,7 +1170,7 @@ plotter = DashPlotter(
 )
 ```
 
-The Dash server runs on a background daemon thread. After the experiment completes, the server stops refreshing (zoom/pan is preserved) but stays alive for inspection. Free the port with:
+The Dash server runs on a background daemon thread. After the experiment completes, the plot freezes (zoom/pan preserved) but the server stays alive for inspection. Free the port when done with:
 
 ```python
 plotter.stop()
@@ -1183,6 +1184,22 @@ plotter = DashPlotter([PlotSpec(x="Vgt", y="sig")])
 runner.run(proc1, plotter=plotter)  # first experiment
 runner.run(proc2, plotter=plotter)  # fresh plot, same browser tab
 ```
+
+#### Early browser open
+
+Call `prepare(proc)` before the runner to open the browser while instruments warm up or pre-checks run:
+
+```python
+plotter = DashPlotter([PlotSpec(x="_time", y="lockin_X")])
+plotter.prepare(monitor)      # server starts, browser opens now
+
+# ... instrument warmup, baseline checks, etc. ...
+
+runner.run_monitor(monitor, plotter=plotter)   # runner detects prepare() was called,
+                                               # skips setup, resets elapsed timer
+```
+
+The elapsed timer always starts from the true experiment start, not from when `prepare()` was called.
 
 #### Themes
 
@@ -1539,6 +1556,65 @@ bench["Vgt"] = 0.5   # diamond appears in the strip; event logged in the rail
 The `color` field of `EventLineConfig` controls the default diamond colour for the selection guide lines. Each unique parameter name is automatically assigned a distinct colour from the built-in palette.
 
 If no events occurred during the run, no `events.yaml` is written.
+
+---
+
+### Post-Experiment Analysis Overlay
+
+Run your own analysis after the sweep completes and overlay the results on the live plot — the Dash server keeps running after `runner.run()` returns.
+
+```python
+import numpy as np
+from scipy.optimize import curve_fit
+from orchid import DashPlotter, PlotSpec, PostResult, ExperimentRunner
+
+plotter = DashPlotter([PlotSpec(x="Vgt", y="signal")], open_browser=True)
+data_dir = runner.run(proc, plotter=plotter)
+
+# ── Your analysis (load data, fit, etc.) ──────────────────────────────
+import zarr
+z = zarr.open(str(data_dir / "vault.zarr"))
+x_data = z["Vgt"][:]
+y_data = z["signal"][:]
+
+def lorentzian(x, x0, w, amp):
+    return amp / (1 + ((x - x0) / w) ** 2)
+
+(x0, w, amp), _ = curve_fit(lorentzian, x_data, y_data, p0=[-0.5, 0.1, 1.0])
+fit_x = np.linspace(x_data[0], x_data[-1], 400)
+fit_y = lorentzian(fit_x, x0, w, amp)
+ss_res = np.sum((y_data - lorentzian(x_data, x0, w, amp)) ** 2)
+r2 = 1 - ss_res / np.sum((y_data - y_data.mean()) ** 2)
+
+# ── Overlay results on the live plot ──────────────────────────────────
+plotter.show_analysis([
+    PostResult(
+        name="Lorentzian Fit",
+        traces=[{"x": fit_x, "y": fit_y, "name": "fit", "dash": "dot"}],
+        vlines=[{"name": "peak",  "x": x0}],
+        hlines=[{"name": "½ max", "y": amp / 2}],
+        points=[{"name": "peak",  "x": x0, "y": amp}],
+        boxes= [{"name": "FWHM",  "x0": x0 - w, "x1": x0 + w,
+                                  "y0": 0.0,     "y1": amp / 2}],
+        railpanel={"peak x": round(x0, 4), "FWHM": round(2 * w, 4), "R²": round(r2, 4)},
+    ),
+])
+```
+
+The plot updates in the browser within 500 ms. The rail shows the **Lorentzian Fit** section with sub-groups for VLines, HLines, Points, Boxes, and the KV rows from `railpanel`.
+
+**Multiple results on different subplots:**
+
+```python
+plotter.show_analysis([
+    PostResult(name="Fit",       subplot=0, traces=[...], railpanel={"R²": 0.997}),
+    PostResult(name="Threshold", subplot=1, hlines=[{"name": "limit", "y": 3.0}]),
+])
+```
+
+Each `PostResult` gets its own colour (auto-assigned from the palette) and its own collapsible section in the rail. Calling `show_analysis()` again replaces the overlay entirely — safe to call in a loop while iterating fits.
+
+**Demo:** `python examples/demo_plot_scenarios.py 17`
 
 ---
 
@@ -2468,6 +2544,53 @@ plotter = DashPlotter(
 
 ---
 
+### PostResult
+
+```python
+from orchid import PostResult
+```
+
+Describes one post-experiment analysis result to overlay on a live plot after `runner.run()` completes. Pass a list of `PostResult` objects to `plotter.show_analysis()`.
+
+| Argument     | Type                    | Default  | Description |
+|--------------|-------------------------|----------|-------------|
+| `name`       | `str`                   | required | Section header in the rail panel and label for this analysis |
+| `subplot`    | `int`                   | `0`      | Default subplot index (0-based) for all elements. Individual elements can override with their own `"subplot"` key |
+| `color`      | `str` or `None`         | `None`   | Colour for all elements. Auto-assigned from the built-in 8-colour palette by result index when `None` |
+| `traces`     | `list[dict]` or `None`  | `None`   | Overlay line traces. Each dict: `{"x", "y", "name"?, "subplot"?, "dash"?, "width"?, "mode"?}` |
+| `vlines`     | `list[dict]` or `None`  | `None`   | Vertical lines. Each dict: `{"name": str, "x": float, "subplot"?: int}`. A chip annotation with the name and x-value appears at the top of the subplot |
+| `hlines`     | `list[dict]` or `None`  | `None`   | Horizontal lines. Each dict: `{"name": str, "y": float, "subplot"?: int}`. A chip annotation with the name and y-value appears at the left edge of the subplot |
+| `points`     | `list[dict]` or `None`  | `None`   | Scatter points. Each dict: `{"name": str, "x": float, "y": float, "subplot"?: int}`. The list index (0, 1, 2…) is shown as a label on the plot marker |
+| `boxes`      | `list[dict]` or `None`  | `None`   | Filled rectangles. Each dict: `{"name": str, "x0", "x1", "y0", "y1": float, "subplot"?: int}`. The list index is shown as a label at the box centre |
+| `railpanel`  | `dict` or `None`        | `None`   | Arbitrary `{label: value}` rows shown at the bottom of the rail section |
+
+All geometric elements (vlines, hlines, points, boxes, traces) work on any subplot type — line, heatmap, live_trace, or trace_heatmap — because they are drawn in axis coordinate space.
+
+Calling `show_analysis()` a second time cleanly replaces the previous overlay.
+
+**Example:**
+
+```python
+from orchid import PostResult
+
+fit_x = np.linspace(-1.0, 0.0, 300)
+fit_y = lorentzian(fit_x, x0=-0.40, width=0.08)
+
+plotter.show_analysis([
+    PostResult(
+        name="Lorentzian Fit",
+        traces=[{"x": fit_x, "y": fit_y, "name": "fit", "dash": "dot"}],
+        vlines=[{"name": "peak",      "x": -0.40}],
+        hlines=[{"name": "½ max",     "y": 0.50}],
+        points=[{"name": "peak",      "x": -0.40, "y": 1.00}],
+        boxes =[{"name": "FWHM",      "x0": -0.48, "x1": -0.32, "y0": 0.0, "y1": 0.5}],
+        railpanel={"peak x": -0.40, "FWHM": 0.16, "R²": 0.998},
+    ),
+])
+```
+
+---
+
 ### PlotSpec
 
 ```python
@@ -2518,8 +2641,8 @@ Override `on_data_changed()` to push updates to your server after each data writ
 
 ```python
     def on_data_changed(self) -> None:
-        # e.g. Taipy: broadcast_callback(self._gui, lambda s: ...)
-        # e.g. Dash: self._data_version += 1  (already done in DashPlotter)
+        # e.g. increment a version counter that the browser polls
+        self._data_version += 1
 ```
 
 #### Lifecycle methods (called by the runner)
@@ -2532,7 +2655,8 @@ Override `on_data_changed()` to push updates to your server after each data writ
 | `update_plane(outer_index, data, sweep_values)`| After each 2D plane completes                                               |
 | `update_monitor(sample_idx, data, timestamp)`  | After each monitor sample. `x="_time"` auto-scales to s/min/hr from zero.  |
 | `notify_event(timestamp, param, value)`        | Add a diamond marker to the event strip and log entry to the rail sidebar   |
-| `finalize()`                                   | Mark experiment done (stops polling; server stays up for zoom/pan)          |
+| `show_analysis(results)`                       | Overlay post-experiment analysis on the plot. No-op in base; `DashPlotter` overrides. See [`PostResult`](#postresult). |
+| `finalize()`                                   | Freeze the plot: latch elapsed time, stop live updates. Server stays up.    |
 | `stop()`                                       | *(abstract)* Stop server, free resources                                    |
 | `is_running` *(property)*                      | *(abstract)* `True` if the server is running                                |
 | `on_data_changed()`                            | Hook called after every write to `_fig_dict`. No-op in base; override for push/poll. |
@@ -2592,11 +2716,19 @@ Available `theme` values: `"orchid"` (default), `"t1000"`, `"vitsoe"`, `"modern"
 
 | Method / Property | Description                                                                                     |
 |-------------------|-------------------------------------------------------------------------------------------------|
-| `stop()`          | Shut down the Dash server and free the port. Called automatically by the runner after each run. |
+| `prepare(proc)`   | Build the figure and start the server *before* calling the runner. See [Early browser open](#early-browser-open). |
+| `stop()`          | Shut down the Dash server and free the port.                                                    |
 | `is_running`      | `True` if the Dash server thread is alive                                                       |
 | `set_run_info(data_dir, experiment_id=None)` | Called automatically by the runner to display the save path in the header. Pass `None` for `write_mode=NONE`. |
+| `show_analysis(results)` | Overlay post-experiment analysis on the live plot. `results` is a `list[PostResult]`. See [Post-experiment analysis](#post-experiment-analysis-overlay). |
+| `save(data_dir)`  | Save the complete figure and plotter config to `data_dir`. Called automatically by the runner at experiment end. See [Static quickview](#static-quickview). |
+| `DashPlotter.load(data_dir, *, port=None)` | *(classmethod)* Reload a saved figure in a new browser window. See [Static quickview](#static-quickview). |
 
 **Reusable across experiments:** `setup()` resets figure state but keeps the server alive, so the browser reconnects without a page reload. Call `stop()` manually to free the port entirely.
+
+#### Stop button (monitor mode)
+
+In monitor mode the header shows a **⏹ Stop** button. Clicking it immediately halts the measurement loop and freezes the plot — identical to the experiment completing naturally. The plot remains interactive (theme switching, event selection, zoom/pan) and the server keeps running. The button changes to **✓ Stopped** and disables itself.
 
 #### Time axis formatting
 
@@ -2631,82 +2763,103 @@ from orchid import DashPlotter, PlotSpec
 
 plotter = DashPlotter([PlotSpec(x="Vgt", y="lockin_X")])
 runner.run(proc, plotter=plotter)
-# Browser opens at http://localhost:8050 with live-updating plot
+# Browser opens at http://localhost:8050; plot freezes when run completes
 
-plotter.stop()  # shut down server to free port (optional)
+plotter.stop()  # free the port when done (optional)
 ```
 
 Requires `plotly` and `dash` (included in the default dependencies).
 
----
+#### Post-experiment analysis overlay
 
-### TaipyPlotter
-
-Push-based live plotting backend using [Taipy GUI](https://docs.taipy.io/en/latest/).  
-Unlike `DashPlotter` (which polls for changes), `TaipyPlotter` pushes each update directly to every connected browser tab via WebSocket — zero polling latency.
+After `runner.run()` returns, call `show_analysis()` to overlay fit curves, annotated lines, scatter points, and shaded regions on the existing live plot. The server is still running — the browser updates on the next 500 ms poll.
 
 ```python
-class TaipyPlotter(PlotterBase)
-```
+data_dir = runner.run(proc, plotter=plotter)
 
-**Constructor parameters** — same as `PlotterBase` plus:
+fit_x, fit_y = compute_fit(data_dir)   # your analysis code
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `port` | `int` | `5000` | TCP port for the Taipy GUI server |
-| `host` | `str` | `"localhost"` | Hostname / IP to bind |
-
-**Usage:**
-
-```python
-from orchid import TaipyPlotter, PlotSpec
-
-# 1-D sweep
-plotter = TaipyPlotter([PlotSpec(x="Vgt", y="lockin_X")])
-runner.run(proc, plotter=plotter)
-# Browser opens at http://localhost:5000
-
-# 2-D sweep — heatmap auto-detected
-plotter = TaipyPlotter([PlotSpec(x="fac", y="lockin_X")], port=5001)
-runner.run(proc_2d, plotter=plotter)
-
-# Multiple subplots
-plotter = TaipyPlotter([
-    PlotSpec(x="Vgt", y="lockin_X"),
-    PlotSpec(x="Vgt", y="lockin_Y"),
+plotter.show_analysis([
+    PostResult(
+        name="Peak Fit",
+        traces=[{"x": fit_x, "y": fit_y, "name": "fit", "dash": "dot"}],
+        vlines=[{"name": "peak",  "x": x0}],
+        hlines=[{"name": "½ max", "y": amp / 2}],
+        points=[{"name": "peak",  "x": x0, "y": amp}],
+        boxes= [{"name": "FWHM",  "x0": x0 - w, "x1": x0 + w,
+                                  "y0": 0.0, "y1": amp / 2}],
+        railpanel={"peak x": x0, "FWHM": 2 * w, "R²": r2},
+    ),
 ])
-
-plotter.stop()   # shut down server (optional)
 ```
 
-**How updates work:**
+**What appears on the plot:**
 
-Every time the experiment writes new data, `PlotterBase` calls `on_data_changed()`.  
-`TaipyPlotter` deep-copies `_fig_dict` for snapshot safety, then calls:
+| Element  | Rendered as | Annotation |
+|----------|-------------|------------|
+| `traces` | Dashed overlay scatter | Legend entry |
+| `vlines` | Dashed vertical line spanning subplot height | Chip at top: name + x-value |
+| `hlines` | Dashed horizontal line spanning subplot width | Chip at left: name + y-value |
+| `points` | Scatter markers with list-index text labels | — |
+| `boxes`  | Filled rectangle (15 % opacity) with list-index label at centre | — |
+
+**What appears in the rail:** A section per `PostResult`, showing sub-groups for each element type, individual entries with their coordinates, and any `railpanel` KV rows at the bottom. Chip and dot colours match the `color` assigned to that `PostResult`.
+
+**Multiple results** stack as separate rail sections and can target different subplots:
 
 ```python
-broadcast_callback(gui, lambda state: setattr(state, "figure", fig_snapshot))
+plotter.show_analysis([
+    PostResult(name="Fit",  subplot=0, traces=[...], railpanel={"R²": 0.998}),
+    PostResult(name="QC",   subplot=1, hlines=[{"name": "threshold", "y": 3.0}]),
+])
 ```
 
-This sends the new figure to **all** browser tabs simultaneously over WebSocket — no polling interval, no stale reads.
+Calling `show_analysis()` again replaces the entire previous overlay cleanly.
 
-**Installation:**
+#### Static quickview
 
-```bash
-pip install "orchid[taipy]"
-# or directly:
-pip install "taipy-gui>=3.1"
+At the end of every run the runner automatically calls `plotter.save(data_dir)`, which writes two files into the experiment's data directory:
+
+| File | Contents |
+|------|----------|
+| `plotter_config.yaml` | Plotter constructor args, `PlotSpec` list, and internal bookkeeping (resolved types, trace offsets, monitor flag, elapsed time). Human-readable. |
+| `figure.json.gz` | Complete Plotly figure dict — layout **and** all trace data — gzip-compressed. Self-contained; no zarr dependency at load time. |
+
+To reopen any saved figure in a new notebook or script:
+
+```python
+from orchid import DashPlotter
+
+plotter = DashPlotter.load("path/to/data_dir")
+# browser opens at http://localhost:8050 showing the saved figure
 ```
 
-**DashPlotter vs TaipyPlotter — when to choose which:**
+The plot opens in a frozen **Done** state — identical to how it looked when the experiment ended. Theme switching, zoom/pan, and event selection all remain interactive.
 
-| | DashPlotter | TaipyPlotter |
-|---|---|---|
-| Update mechanism | Poll every 500 ms | Push (WebSocket) |
-| Extra dependency | `dash`, `plotly` | `taipy-gui` |
-| Multi-tab support | Each tab polls independently | All tabs update in sync |
-| Default port | 8050 | 5000 |
-| Alias | `LivePlotter` | — |
+**Opening an old run while an experiment is live:**
+
+```python
+# live experiment already occupying port 8050
+old = DashPlotter.load("path/to/data_dir", port=8051)
+# opens a second browser tab at http://localhost:8051
+```
+
+**Opening multiple old runs side by side:**
+
+```python
+r1 = DashPlotter.load("run_001", port=8051)
+r2 = DashPlotter.load("run_002", port=8052)
+```
+
+**Replacing a previously loaded figure** (no `port` conflict handling needed):
+
+```python
+p = DashPlotter.load("run_001")
+# ... browse ...
+p = DashPlotter.load("run_002")   # auto-stops the previous server on port 8050
+```
+
+Repeated `load()` calls on the same port silently stop the previous server first — the browser tab refreshes automatically.
 
 ---
 
@@ -3104,11 +3257,11 @@ Live plotting (optional, passed to runner as plotter=...):
               +-------------+--------------+
                             |
               +-------------+--------------+
-              |                            |
-    +---------+----------+    +-----------+-----------+
-    |    DashPlotter      |    |    TaipyPlotter       |
-    |  (LivePlotter)      |    |                       |
-    |  Werkzeug + Dash    |    |  taipy.gui + push     |
-    |  dcc.Interval poll  |    |  broadcast_callback   |
-    +---------------------+    +-----------------------+
+              |
+    +---------+----------+
+    |    DashPlotter      |
+    |  (LivePlotter)      |
+    |  Werkzeug + Dash    |
+    |  dcc.Interval poll  |
+    +---------------------+
 ```

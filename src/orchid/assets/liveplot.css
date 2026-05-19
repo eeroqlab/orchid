@@ -316,6 +316,22 @@ body {
 .lp-btn-primary:hover { filter: brightness(1.05); }
 .lp-btn-ghost { color: var(--ink-mute); }
 
+/* Stop button */
+.lp-btn-stop {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.lp-btn-stop:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.lp-btn-stop-done {
+  border-color: var(--hairline);
+  color: var(--ink-faint);
+  cursor: default;
+}
+.lp-btn-stop-done:hover { border-color: var(--hairline); }
+
 /* ───────────────────── Appearance menu ─────────────────────────── */
 .lp-appearance { position: relative; }
 .lp-appearance > summary {
@@ -599,3 +615,31 @@ body {
 .modebar-btn path { fill: var(--ink-mute) !important; }
 .modebar-btn:hover path { fill: var(--ink) !important; }
 .modebar-btn.active path { fill: var(--accent) !important; }
+
+/* ── Analysis panel ──────────────────────────────────────────────────── */
+.lp-analysis-sub {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding: 6px 0 2px;
+}
+.lp-analysis-item {
+  padding-left: 0;
+}
+.lp-analysis-idx {
+  font-family: monospace;
+  font-size: 13px;
+  font-weight: 600;
+  flex-shrink: 0;
+  width: 18px;
+}
+.lp-analysis-divider {
+  height: 1px;
+  background: var(--hairline);
+  margin: 6px 12px;
+}
+.lp-analysis-dot {
+  flex-shrink: 0;
+}

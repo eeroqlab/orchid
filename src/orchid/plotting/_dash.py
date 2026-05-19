@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from pathlib import Path
 
 from ._spec import (
     PlotSpec,
@@ -32,7 +33,10 @@ def _lp_line_trace_info(plotter) -> list[tuple[str, str]]:
     result = []
     scatter_idx = 0
     strip_idx = getattr(plotter, '_strip_trace_idx', None)
+    analysis_start = getattr(plotter, '_analysis_trace_start_idx', None)
     n_data = strip_idx if strip_idx is not None else len(plotter._fig_dict["data"])
+    if analysis_start is not None:
+        n_data = min(n_data, analysis_start)
     for i, ptype in enumerate(plotter._resolved_types):
         offset = plotter._trace_offsets[i]
         n_next = (plotter._trace_offsets[i + 1]
@@ -62,7 +66,8 @@ def _lp_has_rail(plotter) -> bool:
     has_traces = bool(_lp_line_trace_info(plotter))
     has_instruments = bool(plotter.instrument_info)
     has_events = bool(getattr(plotter, '_events', None))
-    return has_sweeps or has_readouts or has_traces or has_instruments or has_events
+    has_analysis = bool(getattr(plotter, '_analysis_results', None))
+    return has_sweeps or has_readouts or has_traces or has_instruments or has_events or has_analysis
 
 
 def _lp_rail_children(plotter) -> list:
@@ -195,6 +200,93 @@ def _lp_rail_children(plotter) -> list:
             *rows,
         ]))
 
+    # ── Analysis group ────────────────────────────────────────────────
+    analysis_results = getattr(plotter, '_analysis_results', None) or []
+    for ri, pr in enumerate(analysis_results):
+        color = pr.color or _EV_PALETTE[ri % len(_EV_PALETTE)]
+        section_rows = []
+
+        # VLines
+        if pr.vlines:
+            section_rows.append(html.Div("VLines", className="lp-analysis-sub"))
+            for vl in pr.vlines:
+                section_rows.append(html.Div([
+                    html.Span(vl["name"], className="lp-kv-k"),
+                    html.Span(f"x = {vl['x']:.4g}", className="lp-kv-v"),
+                ], className="lp-kv lp-analysis-item"))
+
+        # HLines
+        if pr.hlines:
+            section_rows.append(html.Div("HLines", className="lp-analysis-sub"))
+            for hl in pr.hlines:
+                section_rows.append(html.Div([
+                    html.Span(hl["name"], className="lp-kv-k"),
+                    html.Span(f"y = {hl['y']:.4g}", className="lp-kv-v"),
+                ], className="lp-kv lp-analysis-item"))
+
+        # Points
+        if pr.points:
+            section_rows.append(html.Div([
+                html.Span("Points", className="lp-analysis-sub", style={"flex": "1"}),
+                html.Span(f"({len(pr.points)})", className="lp-group-right"),
+            ], style={"display": "flex", "alignItems": "baseline"}))
+            for pi, pt in enumerate(pr.points):
+                section_rows.append(html.Div([
+                    html.Div([
+                        html.Span(str(pi), className="lp-analysis-idx", style={"color": color}),
+                        html.Span(pt["name"], className="lp-kv-k",
+                                  style={"maxWidth": "none", "flex": "1"}),
+                    ], style={"display": "flex", "alignItems": "baseline",
+                              "gap": "5px", "flex": "1"}),
+                    html.Span(f"{pt['x']:.4g},  {pt['y']:.4g}", className="lp-kv-v"),
+                ], className="lp-kv lp-analysis-item"))
+
+        # Boxes
+        if pr.boxes:
+            section_rows.append(html.Div([
+                html.Span("Boxes", className="lp-analysis-sub", style={"flex": "1"}),
+                html.Span(f"({len(pr.boxes)})", className="lp-group-right"),
+            ], style={"display": "flex", "alignItems": "baseline"}))
+            for bi, box in enumerate(pr.boxes):
+                section_rows.append(html.Div([
+                    html.Div([
+                        html.Span(str(bi), className="lp-analysis-idx", style={"color": color}),
+                        html.Span(box["name"], className="lp-kv-k",
+                                  style={"maxWidth": "none", "flex": "1"}),
+                    ], style={"display": "flex", "alignItems": "baseline",
+                              "gap": "5px", "flex": "1"}),
+                    html.Div([
+                        html.Div(f"x  {box['x0']:.4g} → {box['x1']:.4g}", className="lp-kv-v"),
+                        html.Div(f"y  {box['y0']:.4g} → {box['y1']:.4g}", className="lp-kv-v"),
+                    ]),
+                ], className="lp-kv lp-analysis-item"))
+
+        # railpanel KV rows
+        if pr.railpanel:
+            for k, v in pr.railpanel.items():
+                if isinstance(v, float):
+                    v_str = f"{v:.4g}"
+                else:
+                    v_str = str(v)
+                section_rows.append(html.Div([
+                    html.Span(k, className="lp-kv-k"),
+                    html.Span(v_str, className="lp-kv-v"),
+                ], className="lp-kv lp-analysis-item"))
+
+        sub_badge = f"[sub {pr.subplot}]" if pr.subplot > 0 else ""
+        children.append(html.Div([
+            html.Div([
+                html.Span(style={"background": color, "borderRadius": "50%",
+                                 "width": "8px", "height": "8px",
+                                 "display": "inline-block", "flexShrink": "0"},
+                          className="lp-analysis-dot"),
+                html.Span(pr.name, className="lp-group-title",
+                          style={"marginLeft": "6px", "flex": "1"}),
+                html.Span(sub_badge, className="lp-group-right"),
+            ], className="lp-group-head"),
+            *section_rows,
+        ]))
+
     # ── Events group ──────────────────────────────────────────────────
     if getattr(plotter, '_events', None):
         selected_set = set(plotter._event_selection or [])
@@ -311,6 +403,16 @@ def _lp_header(proc_name: str, theme_name: str, plotter) -> object:
                 html.Span("Running", id="lp-status-text", className="lp-status-text"),
             ]),
         ]),
+        # Stop button — only rendered in monitor mode
+        *([ html.Button(
+            "⏹ Stop" if not plotter._stopped else "✓ Stopped",
+            id="lp-stop-btn",
+            className="lp-btn lp-btn-stop" + (" lp-btn-stop-done" if plotter._stopped else ""),
+            n_clicks=0,
+            disabled=plotter._stopped,
+        )] if plotter._is_monitor else [
+            html.Div(id="lp-stop-btn", style={"display": "none"}, n_clicks=0),
+        ]),
         # Appearance dropdown
         html.Details(className="lp-appearance", children=[
             html.Summary([
@@ -339,6 +441,27 @@ def _lp_header(proc_name: str, theme_name: str, plotter) -> object:
                         n_clicks=0),
         ]),
     ])
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Static save / load helpers
+# ══════════════════════════════════════════════════════════════════════
+
+import numpy as _np
+
+# Port → DashPlotter instance.  Lets _start_server auto-stop any previous
+# plotter on the same port so DashPlotter.load() / DashPlotter() can be
+# called repeatedly in a notebook without "Address already in use" errors.
+_port_registry: dict[int, "DashPlotter"] = {}
+
+
+def _json_encode(x):
+    """JSON ``default`` handler: converts numpy arrays and scalars to Python types."""
+    if isinstance(x, _np.ndarray):
+        return x.tolist()
+    if isinstance(x, _np.generic):   # np.float32, np.int64, etc.
+        return x.item()
+    raise TypeError(f"Object of type {type(x).__name__} is not JSON serializable")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -433,6 +556,11 @@ class DashPlotter(PlotterBase):
         self._event_selection: list = []
         self._strip_trace_idx: int | None = None
         self._param_colors: dict[str, str] = {}
+        self._analysis_results: list = []
+        self._analysis_trace_start_idx: int | None = None
+        self._stop_fn = None       # set by runner via set_stop_callback()
+        self._is_monitor: bool = False
+        self._prepared: bool = False  # set by prepare(); consumed by runner
 
         # Poll-version counter — Dash reads these in the refresh() callback
         self._data_version = 0
@@ -453,6 +581,11 @@ class DashPlotter(PlotterBase):
         self._event_selection = []
         self._strip_trace_idx = None
         self._param_colors = {}
+        self._analysis_results = []
+        self._analysis_trace_start_idx = None
+        self._stop_fn = None
+        self._is_monitor = hasattr(proc, 'interval') and not hasattr(proc, 'sweeps')
+        self._prepared = False
         super().setup(proc)
 
     # ── Rail data caching ──────────────────────────────────────────────
@@ -652,18 +785,369 @@ class DashPlotter(PlotterBase):
         for ev in self._events:
             if ev["id"] not in selected_set:
                 continue
-            shapes.append({
-                "_ev_guide": True,
-                "type": "line", "xref": "x", "yref": "paper",
-                "x0": ev["t_elapsed"], "x1": ev["t_elapsed"],
-                "y0": 0.0, "y1": 0.88,
-                "line": {"color": self.event_line.color, "width": 1},
-                "opacity": 0.6,
-            })
+            # Draw one guide per _time subplot, each confined to its own axis.
+            for i, spec in enumerate(self.specs):
+                if not isinstance(spec.x, str) or spec.x != "_time":
+                    continue
+                xref  = "x" if i == 0 else f"x{i + 1}"
+                yaxis = "y" if i == 0 else f"y{i + 1}"
+                shapes.append({
+                    "_ev_guide": True,
+                    "type": "line",
+                    "xref": xref, "yref": f"{yaxis} domain",
+                    "x0": ev["t_elapsed"], "x1": ev["t_elapsed"],
+                    "y0": 0.0, "y1": 1.0,
+                    "line": {"color": ev["color"], "width": 1.5},
+                    "opacity": 0.6,
+                })
         layout["shapes"] = shapes
         self._data_version += 1
 
+    def show_analysis(self, results: list) -> None:
+        """Overlay analysis traces, lines, points, and boxes on the live plot.
+
+        Parameters
+        ----------
+        results : list of PostResult
+            One or more analysis results. Each is rendered as its own rail
+            section. Call after ``runner.run()`` completes.
+        """
+        self._analysis_results = list(results)
+        if self._fig_dict is None:
+            return
+
+        from ._themes import THEMES
+        _theme = THEMES.get(self._current_theme, THEMES["orchid"])
+        _chip_bg   = _theme["panel"]
+        _chip_ink  = _theme["ink"]
+        _chip_mute = _theme["ink_faint"]
+
+        layout = self._fig_dict["layout"]
+
+        # Remove any previous analysis elements
+        layout["shapes"] = [s for s in layout.get("shapes", []) if not s.get("_analysis")]
+        layout["annotations"] = [a for a in layout.get("annotations", []) if not a.get("_analysis")]
+        # Remove previous analysis traces
+        if self._analysis_trace_start_idx is not None:
+            self._fig_dict["data"] = self._fig_dict["data"][:self._analysis_trace_start_idx]
+
+        self._analysis_trace_start_idx = len(self._fig_dict["data"])
+        shapes = list(layout.get("shapes", []))
+        annotations = list(layout.get("annotations", []))
+
+        def _xref(sub: int) -> str:
+            return "x" if sub == 0 else f"x{sub + 1}"
+
+        def _yref(sub: int) -> str:
+            return "y" if sub == 0 else f"y{sub + 1}"
+
+        def _ydomain(sub: int) -> list:
+            key = "yaxis" if sub == 0 else f"yaxis{sub + 1}"
+            return list(layout.get(key, {}).get("domain", [0.0, 1.0]))
+
+        def _xdomain(sub: int) -> list:
+            key = "xaxis" if sub == 0 else f"xaxis{sub + 1}"
+            return list(layout.get(key, {}).get("domain", [0.0, 1.0]))
+
+        for ri, pr in enumerate(results):
+            color = pr.color or _EV_PALETTE[ri % len(_EV_PALETTE)]
+            default_sub = pr.subplot
+
+            # ── Traces ────────────────────────────────────────────────
+            for t in (pr.traces or []):
+                sub = t.get("subplot", default_sub)
+                self._fig_dict["data"].append({
+                    "type": "scatter",
+                    "x": list(t["x"]),
+                    "y": list(t["y"]),
+                    "name": t.get("name", pr.name),
+                    "mode": t.get("mode", "lines"),
+                    "xaxis": _xref(sub),
+                    "yaxis": _yref(sub),
+                    "line": {
+                        "color": t.get("color", color),
+                        "width": t.get("width", 2),
+                        "dash":  t.get("dash", "dot"),
+                    },
+                    "showlegend": True,
+                    "_analysis": True,
+                })
+
+            # ── VLines ────────────────────────────────────────────────
+            for vl in (pr.vlines or []):
+                sub = vl.get("subplot", default_sub)
+                yd = _ydomain(sub)
+                shapes.append({
+                    "_analysis": True,
+                    "type": "line",
+                    "xref": _xref(sub), "yref": "paper",
+                    "x0": vl["x"], "x1": vl["x"],
+                    "y0": yd[0], "y1": yd[1],
+                    "line": {"color": color, "width": 1.5, "dash": "dash"},
+                })
+                chip_text = (
+                    f"<span style='font-size:9px;color:{_chip_mute};"
+                    f"text-transform:uppercase;letter-spacing:0.06em'>"
+                    f"{vl['name']}</span><br>"
+                    f"<b style='color:{_chip_ink}'>x = {vl['x']:.4g}</b>"
+                )
+                annotations.append({
+                    "_analysis": True,
+                    "xref": _xref(sub), "yref": "paper",
+                    "x": vl["x"], "y": yd[1],
+                    "text": chip_text,
+                    "showarrow": True,
+                    "arrowhead": 0, "arrowwidth": 1,
+                    "arrowcolor": color, "arrowside": "none",
+                    "ax": 0, "ay": 4, "axref": "pixel", "ayref": "pixel",
+                    "xanchor": "center", "yanchor": "top",
+                    "bgcolor": _chip_bg,
+                    "bordercolor": color, "borderwidth": 1.5, "borderpad": 5,
+                    "align": "left",
+                    "font": {"family": "ui-monospace, monospace", "size": 10,
+                             "color": _chip_ink},
+                })
+
+            # ── HLines ────────────────────────────────────────────────
+            for hl in (pr.hlines or []):
+                sub = hl.get("subplot", default_sub)
+                xd = _xdomain(sub)
+                shapes.append({
+                    "_analysis": True,
+                    "type": "line",
+                    "xref": "paper", "yref": _yref(sub),
+                    "x0": xd[0], "x1": xd[1],
+                    "y0": hl["y"], "y1": hl["y"],
+                    "line": {"color": color, "width": 1.5, "dash": "dash"},
+                })
+                chip_text = (
+                    f"<span style='font-size:9px;color:{_chip_mute};"
+                    f"text-transform:uppercase;letter-spacing:0.06em'>"
+                    f"{hl['name']}</span><br>"
+                    f"<b style='color:{_chip_ink}'>y = {hl['y']:.4g}</b>"
+                )
+                annotations.append({
+                    "_analysis": True,
+                    "xref": "paper", "yref": _yref(sub),
+                    "x": xd[0], "y": hl["y"],
+                    "text": chip_text,
+                    "showarrow": True,
+                    "arrowhead": 0, "arrowwidth": 1,
+                    "arrowcolor": color, "arrowside": "none",
+                    "ax": 6, "ay": 0, "axref": "pixel", "ayref": "pixel",
+                    "xanchor": "left", "yanchor": "middle",
+                    "bgcolor": _chip_bg,
+                    "bordercolor": color, "borderwidth": 1.5, "borderpad": 5,
+                    "align": "left",
+                    "font": {"family": "ui-monospace, monospace", "size": 10,
+                             "color": _chip_ink},
+                })
+
+            # ── Points (grouped by subplot into one trace each) ───────
+            from collections import defaultdict
+            pts_by_sub: dict[int, list] = defaultdict(list)
+            for pi, pt in enumerate(pr.points or []):
+                sub = pt.get("subplot", default_sub)
+                pts_by_sub[sub].append((pi, pt))
+            for sub, pt_list in pts_by_sub.items():
+                xs = [p["x"] for _, p in pt_list]
+                ys = [p["y"] for _, p in pt_list]
+                labels = [str(i) for i, _ in pt_list]
+                self._fig_dict["data"].append({
+                    "type": "scatter",
+                    "x": xs, "y": ys,
+                    "mode": "markers+text",
+                    "text": labels,
+                    "textposition": "top center",
+                    "name": f"{pr.name} points",
+                    "xaxis": _xref(sub), "yaxis": _yref(sub),
+                    "marker": {"color": color, "size": 10, "symbol": "circle"},
+                    "showlegend": True,
+                    "_analysis": True,
+                })
+
+            # ── Boxes ────────────────────────────────────────────────
+            for bi, box in enumerate(pr.boxes or []):
+                sub = box.get("subplot", default_sub)
+                shapes.append({
+                    "_analysis": True,
+                    "type": "rect",
+                    "xref": _xref(sub), "yref": _yref(sub),
+                    "x0": box["x0"], "x1": box["x1"],
+                    "y0": box["y0"], "y1": box["y1"],
+                    "line": {"color": color, "width": 1.5},
+                    "fillcolor": color,
+                    "opacity": 0.15,
+                })
+                annotations.append({
+                    "_analysis": True,
+                    "xref": _xref(sub), "yref": _yref(sub),
+                    "x": (box["x0"] + box["x1"]) / 2,
+                    "y": (box["y0"] + box["y1"]) / 2,
+                    "text": str(bi),
+                    "showarrow": False,
+                    "font": {"size": 11, "color": color},
+                })
+
+        layout["shapes"] = shapes
+        layout["annotations"] = annotations
+        self.on_data_changed()
+
     # ── PlotterBase interface ──────────────────────────────────────────
+
+    def prepare(self, proc) -> None:
+        """Set up the plotter before calling ``runner.run()`` or ``runner.run_monitor()``.
+
+        Builds the figure, starts the Dash server, and opens the browser
+        immediately — before the experiment begins.  The runner will detect
+        that setup has already been done and skip its own ``setup()`` call,
+        but will still reset the elapsed timer to the actual experiment start.
+
+        Example::
+
+            plotter.prepare(proc)        # browser opens here
+            # ... instrument warmup ...
+            runner.run_monitor(proc, plotter=plotter)
+        """
+        self.setup(proc)       # resets state, builds figure, starts server
+        self._prepared = True  # must be set after setup() which clears it
+
+    def _mark_start(self) -> None:
+        """Reset the elapsed timer to now.  Called by the runner at the true
+        experiment start, overriding the time set during setup() / prepare()."""
+        self._start_time = time.time()
+        self._final_elapsed = None
+
+    def set_stop_callback(self, fn) -> None:
+        """Register a callable that halts the running experiment.
+
+        Called by the runner before the monitor loop starts so the Stop button
+        in the browser can signal the measurement loop to exit.
+        """
+        self._stop_fn = fn
+
+    def finalize(self) -> None:
+        """Freeze the plot: latch elapsed time and stop live updates."""
+        self._final_elapsed = _format_elapsed_display(
+            time.time() - self._start_time
+        ) if self._start_time is not None else "--:--"
+        super().finalize()
+
+    # ── Config save / load ────────────────────────────────────────────
+
+    def save(self, data_dir) -> None:
+        """Save plotter configuration and figure to *data_dir*.
+
+        Writes two files:
+
+        ``plotter_config.yaml``
+            Plotter constructor args, ``PlotSpec`` list, and internal
+            bookkeeping needed to restore the rail and header at load time.
+
+        ``figure.json.gz``
+            Complete Plotly figure dict (layout + all trace data) compressed
+            with gzip.  Self-contained: no zarr dependency at load time.
+        """
+        import dataclasses, gzip, json, yaml
+
+        el = self.event_line
+        config = {
+            "version": 2,
+            "meta": {
+                "proc_name": self._proc.name if self._proc else "unknown",
+                "elapsed":   self._final_elapsed,
+            },
+            "specs": [s.to_dict() for s in self.specs],
+            "plotter": {
+                "port":            self.port,
+                "update_interval": self.update_interval,
+                "theme":           self._current_theme,
+                "open_browser":    self.open_browser,
+                "max_display_pts": self.max_display_pts,
+                "rail_readouts":   list(self.rail_readouts),
+                "instrument_info": dict(self.instrument_info),
+                **({"event_line": dataclasses.asdict(el)} if el is not None else {}),
+            },
+            "internal": {
+                "resolved_types":           list(self._resolved_types),
+                "trace_offsets":            list(self._trace_offsets),
+                "strip_trace_idx":          self._strip_trace_idx,
+                "analysis_trace_start_idx": self._analysis_trace_start_idx,
+                "is_monitor":               self._is_monitor,
+                "monitor_interval":         getattr(self._proc, "interval", None),
+                "time_unit":                self._time_unit_from_state(),
+            },
+        }
+
+        data_dir = Path(data_dir)
+        (data_dir / "plotter_config.yaml").write_text(
+            yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+        )
+        if self._fig_dict is not None:
+            payload = json.dumps(self._fig_dict, default=_json_encode).encode()
+            with gzip.open(data_dir / "figure.json.gz", "wb") as fh:
+                fh.write(payload)
+
+    @classmethod
+    def load(cls, data_dir, *, port: int | None = 8052) -> "DashPlotter":
+        """Load a saved plotter configuration and open the browser.
+
+        Reads ``plotter_config.yaml`` and ``figure.json.gz`` from *data_dir*
+        and starts the Dash server.  The plot is shown in a frozen (Done)
+        state — identical to how it looked at the end of the original run.
+
+        Parameters
+        ----------
+        data_dir : str or Path
+            Directory containing ``plotter_config.yaml`` and ``figure.json.gz``.
+        port : int, optional
+            Override the port saved in the config.  Useful when the original
+            port is already occupied by a running experiment::
+
+                # live experiment on 8050, browse an old run in parallel
+                old = DashPlotter.load("run_2024_001", port=8051)
+
+        Example::
+
+            from orchid import DashPlotter
+
+            plotter = DashPlotter.load("/path/to/data_dir")
+            # browser opens with the saved figure
+        """
+        import gzip, json, yaml
+        from ._spec import EventLineConfig
+
+        data_dir = Path(data_dir)
+        config   = yaml.safe_load((data_dir / "plotter_config.yaml").read_text())
+        with gzip.open(data_dir / "figure.json.gz", "rb") as fh:
+            fig_dict = json.loads(fh.read())
+
+        # Reconstruct plotter from saved args
+        pa = dict(config["plotter"])
+        if port is not None:
+            pa["port"] = port
+        if "event_line" in pa and pa["event_line"] is not None:
+            pa["event_line"] = EventLineConfig(**pa["event_line"])
+        specs   = [PlotSpec.from_dict(s) for s in config["specs"]]
+        plotter = cls(plots=specs, **pa)
+
+        # Restore internal bookkeeping so the rail / strip work correctly
+        internal = config["internal"]
+        plotter._resolved_types           = internal["resolved_types"]
+        plotter._trace_offsets            = internal["trace_offsets"]
+        plotter._strip_trace_idx          = internal.get("strip_trace_idx")
+        plotter._analysis_trace_start_idx = internal.get("analysis_trace_start_idx")
+        plotter._is_monitor               = internal.get("is_monitor", False)
+        plotter._final_elapsed            = config["meta"].get("elapsed")
+        plotter._fig_dict                 = fig_dict
+        plotter._stopped                  = True
+
+        # Minimal proc stub so the header shows the original experiment name
+        proc_name = config.get("meta", {}).get("proc_name", "Orchid")
+        plotter._proc = type("_ProcStub", (), {"name": proc_name})()
+
+        plotter._start_server()
+        return plotter
 
     def on_data_changed(self) -> None:
         """Increment the poll-version counter so Dash sends the next update."""
@@ -758,6 +1242,9 @@ class DashPlotter(PlotterBase):
             Output("lp-status-text", "children"),
             Output("lp-rail", "children"),
             Output("lp-data-info", "children"),
+            Output("lp-stop-btn", "children"),
+            Output("lp-stop-btn", "disabled"),
+            Output("lp-stop-btn", "className"),
             Input("interval", "n_intervals"),
             Input("lp-theme-radio", "value"),
         )
@@ -773,8 +1260,10 @@ class DashPlotter(PlotterBase):
             else:
                 fig_out = no_update
 
-            # Elapsed time
-            if plotter._start_time is not None:
+            # Elapsed time — latch to final value once stopped
+            if plotter._stopped and plotter._final_elapsed is not None:
+                elapsed_str = plotter._final_elapsed
+            elif plotter._start_time is not None:
                 elapsed_str = _format_elapsed_display(time.time() - plotter._start_time)
             else:
                 elapsed_str = "--:--"
@@ -811,7 +1300,13 @@ class DashPlotter(PlotterBase):
                     _html.Span(leaf, className="lp-data-id"),
                 ]
 
-            return fig_out, elapsed_str, dot_cls, status_text, rail_children, data_info
+            # Stop button state
+            stopped = plotter._stopped
+            stop_label = "✓ Stopped" if stopped else "⏹ Stop"
+            stop_cls = "lp-btn lp-btn-stop" + (" lp-btn-stop-done" if stopped else "")
+
+            return (fig_out, elapsed_str, dot_cls, status_text, rail_children,
+                    data_info, stop_label, stopped, stop_cls)
 
         # ── Theme class update ─────────────────────────────────────────
         @app.callback(
@@ -821,6 +1316,24 @@ class DashPlotter(PlotterBase):
         )
         def update_theme_class(theme_name):
             return f"theme-{theme_name}"
+
+        # ── Stop button ────────────────────────────────────────────────
+        @app.callback(
+            Output("lp-stop-btn", "children", allow_duplicate=True),
+            Output("lp-stop-btn", "disabled", allow_duplicate=True),
+            Output("lp-stop-btn", "className", allow_duplicate=True),
+            Input("lp-stop-btn", "n_clicks"),
+            prevent_initial_call=True,
+        )
+        def on_stop(n_clicks):
+            if not n_clicks:
+                return no_update, no_update, no_update
+            # Signal the measurement loop to exit
+            if plotter._stop_fn is not None:
+                plotter._stop_fn()
+            # Freeze the plot immediately (latch elapsed, set _stopped)
+            plotter.finalize()
+            return "✓ Stopped", True, "lp-btn lp-btn-stop lp-btn-stop-done"
 
         # ── Snapshot — client-side full-page capture via html2canvas ──
         app.clientside_callback(
@@ -969,9 +1482,16 @@ class DashPlotter(PlotterBase):
 
         from werkzeug.serving import make_server
 
+        # Auto-stop any previous plotter occupying this port so repeated
+        # DashPlotter.load() / DashPlotter() calls in a notebook just work.
+        prev = _port_registry.get(self.port)
+        if prev is not None and prev is not self:
+            prev.stop(_silent=True)
+
         # Bind socket on the calling thread so port errors surface immediately
         srv = make_server("127.0.0.1", self.port, app.server)
         self._wsgi_server = srv
+        _port_registry[self.port] = self
 
         self._server_thread = threading.Thread(target=srv.serve_forever, daemon=True)
         self._server_thread.start()
@@ -997,6 +1517,7 @@ class DashPlotter(PlotterBase):
             self._wsgi_server = None
         self._server_thread = None
         self._dash_app = None
+        _port_registry.pop(self.port, None)
         if not _silent:
             print("Live plot server stopped.")
 
