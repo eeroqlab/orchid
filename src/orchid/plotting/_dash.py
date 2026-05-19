@@ -403,14 +403,14 @@ def _lp_header(proc_name: str, theme_name: str, plotter) -> object:
                 html.Span("Running", id="lp-status-text", className="lp-status-text"),
             ]),
         ]),
-        # Stop button — only rendered in monitor mode
+        # Stop button — rendered in monitor and sweep modes
         *([ html.Button(
             "⏹ Stop" if not plotter._stopped else "✓ Stopped",
             id="lp-stop-btn",
             className="lp-btn lp-btn-stop" + (" lp-btn-stop-done" if plotter._stopped else ""),
             n_clicks=0,
             disabled=plotter._stopped,
-        )] if plotter._is_monitor else [
+        )] if (plotter._is_monitor or plotter._is_sweep) else [
             html.Div(id="lp-stop-btn", style={"display": "none"}, n_clicks=0),
         ]),
         # Appearance dropdown
@@ -560,6 +560,7 @@ class DashPlotter(PlotterBase):
         self._analysis_trace_start_idx: int | None = None
         self._stop_fn = None       # set by runner via set_stop_callback()
         self._is_monitor: bool = False
+        self._is_sweep: bool = False
         self._prepared: bool = False  # set by prepare(); consumed by runner
 
         # Poll-version counter — Dash reads these in the refresh() callback
@@ -585,6 +586,7 @@ class DashPlotter(PlotterBase):
         self._analysis_trace_start_idx = None
         self._stop_fn = None
         self._is_monitor = hasattr(proc, 'interval') and not hasattr(proc, 'sweeps')
+        self._is_sweep = hasattr(proc, 'sweeps') and bool(proc.sweeps)
         self._prepared = False
         super().setup(proc)
 
@@ -617,7 +619,7 @@ class DashPlotter(PlotterBase):
     def _time_unit_from_state(self) -> str | None:
         """Return current time unit from first _time spec's state dict."""
         for i, spec in enumerate(self.specs):
-            if spec.x == "_time" and i in self._sweep_data:
+            if isinstance(spec.x, str) and spec.x == "_time" and i in self._sweep_data:
                 states = self._sweep_data[i]
                 if states:
                     return states[0].get("_unit")

@@ -2726,9 +2726,15 @@ Available `theme` values: `"orchid"` (default), `"t1000"`, `"vitsoe"`, `"modern"
 
 **Reusable across experiments:** `setup()` resets figure state but keeps the server alive, so the browser reconnects without a page reload. Call `stop()` manually to free the port entirely.
 
-#### Stop button (monitor mode)
+#### Stop button
 
-In monitor mode the header shows a **⏹ Stop** button. Clicking it immediately halts the measurement loop and freezes the plot — identical to the experiment completing naturally. The plot remains interactive (theme switching, event selection, zoom/pan) and the server keeps running. The button changes to **✓ Stopped** and disables itself.
+The header shows a **⏹ Stop** button in both sweep and monitor modes. Clicking it signals the measurement loop to stop after the current point completes, then freezes the plot — identical to the experiment finishing naturally. Collected data is saved with `status: "stopped"`. The plot remains interactive (theme switching, zoom/pan) and the server keeps running. The button changes to **✓ Stopped** and disables itself.
+
+You can also stop a running sweep programmatically from code:
+
+```python
+runner.stop()   # sweep exits cleanly after the current point
+```
 
 #### Time axis formatting
 
@@ -2973,10 +2979,11 @@ Executes procedures and manages data flow to zarro. Internally delegates sweep e
 
 | Method / Property                       | Description                              |
 |-----------------------------------------|------------------------------------------|
-| `run(procedure, plotter=None, print_summary=False, return_path=False) -> Path or None` | Run sweep experiment (sync) |
-| `await arun(procedure, plotter=None, print_summary=False) -> Path` | Run sweep experiment (async) |
-| `run_monitor(procedure, plotter=None, background=False, print_summary=False, return_path=False) -> Path or None` | Run time-series monitor |
-| `await arun_monitor(procedure, plotter=None, print_summary=False) -> Path` | Run monitor (async) |
+| `run(procedure, plotter=None, print_summary=False, return_path=False, save_plot=True) -> Path or None` | Run sweep experiment (sync) |
+| `await arun(procedure, plotter=None, print_summary=False, save_plot=True) -> Path` | Run sweep experiment (async) |
+| `stop()`                                | Stop a running sweep after the current point — data saved, plot frozen |
+| `run_monitor(procedure, plotter=None, background=False, print_summary=False, return_path=False, save_plot=True) -> Path or None` | Run time-series monitor |
+| `await arun_monitor(procedure, plotter=None, print_summary=False, save_plot=True) -> Path` | Run monitor (async) |
 | `stop_monitor() -> Path`                | Stop a background monitor and return data path |
 | `is_monitoring` *(property)*            | `True` if a background monitor is currently running |
 
@@ -2990,6 +2997,7 @@ All methods return the `Path` to the output data directory.
 | `plotter`       | `PlotterBase` or `None` | `None`  | Live plotter (any `PlotterBase` subclass)     |
 | `print_summary` | `bool`                  | `False` | If `True`, print the procedure summary table before running. |
 | `return_path`   | `bool`                  | `False` | If `True`, return the `Path` to the saved data directory (`run()` only). |
+| `save_plot`     | `bool`                  | `True`  | If `True`, call `plotter.save()` at experiment end so the figure can be reloaded with `DashPlotter.load()`. Set to `False` to skip (e.g. quick tests). |
 
 **`run_monitor` parameters:**
 
@@ -3000,8 +3008,15 @@ All methods return the `Path` to the output data directory.
 | `background`    | `bool`                  | `False` | If `True`, run in background thread and return immediately. Use `bench["Vgt"] = 0.5` to change parameters, `runner.stop_monitor()` to stop. |
 | `print_summary` | `bool`                  | `False` | If `True`, print the procedure summary table before running. |
 | `return_path`   | `bool`                  | `False` | If `True`, return the `Path` to the saved data directory. In background mode, always returns `None`; use `stop_monitor()` to get the path. |
+| `save_plot`     | `bool`                  | `True`  | If `True`, call `plotter.save()` at experiment end. Set to `False` to skip. |
 
-**Interrupt handling:** `Ctrl+C` cleanly stops any running experiment, saves collected data with `status: "interrupted"` in metadata, and prints a single-line message. No tracebacks in Jupyter.
+**Stopping experiments:**
+
+| Method | When to use | Metadata status |
+|--------|-------------|-----------------|
+| `runner.stop()` | Stop a sweep cleanly from code or browser button — current point finishes, data saved | `"stopped"` |
+| `runner.stop_monitor()` | Stop a background monitor | `"stopped"` |
+| `Ctrl+C` | Emergency interrupt — saves collected data, no further teardown | `"interrupted"` |
 
 #### Write strategies
 
