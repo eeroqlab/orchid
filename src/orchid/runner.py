@@ -566,7 +566,8 @@ class ExperimentRunner:
 
     def run(self, procedure: Procedure, plotter=None,
             print_summary: bool = False,
-            return_path: bool = False) -> Path | None:
+            return_path: bool = False,
+            save_plot: bool = True) -> Path | None:
         """Run a sweep experiment synchronously.
 
         Works both from scripts (no event loop) and from Jupyter
@@ -586,6 +587,10 @@ class ExperimentRunner:
         return_path : bool
             If True, return the Path to the saved data directory.
             Default is False (returns None).
+        save_plot : bool
+            If True (default), call ``plotter.save()`` at the end of the run
+            so the figure can be reloaded with ``DashPlotter.load()``.
+            Set to False to skip saving the figure (e.g. during quick tests).
 
         Returns
         -------
@@ -600,7 +605,8 @@ class ExperimentRunner:
         }
         try:
             result = _run_coro(self.arun(procedure, plotter=plotter,
-                                         print_summary=print_summary))
+                                         print_summary=print_summary,
+                                         save_plot=save_plot))
         except (KeyboardInterrupt, asyncio.CancelledError):
             result = self._handle_interrupt()
 
@@ -670,7 +676,8 @@ class ExperimentRunner:
                     )
 
     async def arun(self, proc: Procedure, plotter=None,
-                   print_summary: bool = False) -> Path:
+                   print_summary: bool = False,
+                   save_plot: bool = True) -> Path:
         """Run a sweep experiment asynchronously."""
         try:
             from tqdm import tqdm
@@ -755,7 +762,7 @@ class ExperimentRunner:
 
         if plotter is not None:
             plotter.finalize()
-            if not no_save and hasattr(plotter, 'save'):
+            if not no_save and save_plot and hasattr(plotter, 'save'):
                 plotter.save(data_dir)
 
         if no_save:
@@ -769,7 +776,8 @@ class ExperimentRunner:
     def run_monitor(self, procedure: MonitorProcedure, plotter=None,
                      background: bool = False,
                      print_summary: bool = False,
-                     return_path: bool = False) -> Path | None:
+                     return_path: bool = False,
+                     save_plot: bool = True) -> Path | None:
         """Run time-series monitoring.
 
         Parameters
@@ -788,6 +796,10 @@ class ExperimentRunner:
         return_path : bool
             If True, return the Path to the saved data directory.
             Default is False (returns None).
+        save_plot : bool
+            If True (default), call ``plotter.save()`` at the end of the run
+            so the figure can be reloaded with ``DashPlotter.load()``.
+            Set to False to skip saving the figure.
 
         Returns
         -------
@@ -806,7 +818,8 @@ class ExperimentRunner:
         }
         try:
             result = _run_coro(self.arun_monitor(procedure, plotter=plotter,
-                                                  print_summary=print_summary))
+                                                  print_summary=print_summary,
+                                                  save_plot=save_plot))
         except (KeyboardInterrupt, asyncio.CancelledError):
             result = self._handle_interrupt()
 
@@ -861,7 +874,8 @@ class ExperimentRunner:
         return result
 
     async def arun_monitor(self, proc: MonitorProcedure, plotter=None,
-                           print_summary: bool = False) -> Path:
+                           print_summary: bool = False,
+                           save_plot: bool = True) -> Path:
         """Run time-series monitoring asynchronously."""
         if print_summary:
             proc.summary()
@@ -999,7 +1013,7 @@ class ExperimentRunner:
 
         if plotter is not None:
             plotter.finalize()
-            if hasattr(plotter, 'save'):
+            if save_plot and hasattr(plotter, 'save'):
                 plotter.save(data_dir)
 
         if interrupted:
