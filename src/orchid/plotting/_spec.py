@@ -49,6 +49,48 @@ class EventLineConfig:
 
 
 @dataclass
+class PostResult:
+    """Describes one post-experiment analysis result to overlay on the live plot.
+
+    Parameters
+    ----------
+    name : str
+        Section header in the rail panel and analysis label.
+    subplot : int
+        Default subplot index (0-based) for all elements. Individual elements
+        can override with their own ``"subplot"`` key.
+    color : str or None
+        Colour for all elements in this result. Auto-assigned from
+        ``_EV_PALETTE`` by result index when ``None``.
+    traces : list of dict or None
+        Overlay line traces. Each dict: ``{"x", "y", "name"?, "subplot"?,
+        "dash"?, "width"?, "mode"?}``.
+    vlines : list of dict or None
+        Vertical lines. Each dict: ``{"name": str, "x": float, "subplot"?: int}``.
+    hlines : list of dict or None
+        Horizontal lines. Each dict: ``{"name": str, "y": float, "subplot"?: int}``.
+    points : list of dict or None
+        Annotated scatter points. Each dict: ``{"name": str, "x": float,
+        "y": float, "subplot"?: int}``. List index shown as label on plot.
+    boxes : list of dict or None
+        Filled rectangles. Each dict: ``{"name": str, "x0", "x1", "y0",
+        "y1": float, "subplot"?: int}``. List index shown as label on plot.
+    railpanel : dict or None
+        Arbitrary ``{label: value}`` rows shown at the bottom of the section.
+    """
+
+    name: str
+    subplot: int = 0
+    color: str | None = None
+    traces: list[dict] | None = None
+    vlines: list[dict] | None = None
+    hlines: list[dict] | None = None
+    points: list[dict] | None = None
+    boxes: list[dict] | None = None
+    railpanel: dict | None = None
+
+
+@dataclass
 class PlotSpec:
     """Describes one subplot in a LivePlotter.
 

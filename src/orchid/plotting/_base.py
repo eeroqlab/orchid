@@ -103,6 +103,14 @@ class PlotterBase(abc.ABC):
         The default is a no-op.
         """
 
+    def show_analysis(self, results: list) -> None:
+        """Overlay post-experiment analysis results on the live plot.
+
+        Call this after ``runner.run()`` completes and your analysis process
+        returns its results. Accepts a list of :class:`PostResult` objects.
+        The default implementation is a no-op; :class:`DashPlotter` overrides it.
+        """
+
     def on_data_changed(self) -> None:
         """Called after every write to ``_fig_dict``.
 

@@ -1,6 +1,6 @@
 """Live plotting for experiments — backend-agnostic base with swappable servers."""
 
-from ._spec import EventLineConfig, PlotSpec
+from ._spec import EventLineConfig, PlotSpec, PostResult
 from ._base import PlotterBase
 from ._dash import DashPlotter, LivePlotter, _lp_line_trace_info, _lp_has_rail, _lp_rail_children, _lp_header
 from ._taipy import TaipyPlotter
@@ -8,6 +8,7 @@ from ._taipy import TaipyPlotter
 __all__ = [
     "EventLineConfig",
     "PlotSpec",
+    "PostResult",
     "PlotterBase",
     "DashPlotter",
     "LivePlotter",

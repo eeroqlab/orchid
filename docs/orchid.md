@@ -28,6 +28,7 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [Controller Limits](#controller-limits)
   - [Virtual Controllers](#virtual-controllers)
   - [Controller Event Logging](#controller-event-logging)
+  - [Post-Experiment Analysis Overlay](#post-experiment-analysis-overlay)
   - [Background Monitoring](#background-monitoring)
   - [Custom Hooks](#custom-hooks)
   - [Mixed Readouts (Scalar + Trace)](#mixed-readouts-scalar--trace)
@@ -47,6 +48,7 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [Procedure](#procedure)
   - [MonitorProcedure](#monitorprocedure)
   - [EventLineConfig](#eventlineconfig)
+  - [PostResult](#postresult)
   - [PlotSpec](#plotspec)
   - [PlotterBase](#plotterbase)
   - [DashPlotter / LivePlotter](#dashplotter--liveplotter)
@@ -1542,6 +1544,65 @@ If no events occurred during the run, no `events.yaml` is written.
 
 ---
 
+### Post-Experiment Analysis Overlay
+
+Run your own analysis after the sweep completes and overlay the results on the live plot — the Dash server keeps running after `runner.run()` returns.
+
+```python
+import numpy as np
+from scipy.optimize import curve_fit
+from orchid import DashPlotter, PlotSpec, PostResult, ExperimentRunner
+
+plotter = DashPlotter([PlotSpec(x="Vgt", y="signal")], open_browser=True)
+data_dir = runner.run(proc, plotter=plotter)
+
+# ── Your analysis (load data, fit, etc.) ──────────────────────────────
+import zarr
+z = zarr.open(str(data_dir / "vault.zarr"))
+x_data = z["Vgt"][:]
+y_data = z["signal"][:]
+
+def lorentzian(x, x0, w, amp):
+    return amp / (1 + ((x - x0) / w) ** 2)
+
+(x0, w, amp), _ = curve_fit(lorentzian, x_data, y_data, p0=[-0.5, 0.1, 1.0])
+fit_x = np.linspace(x_data[0], x_data[-1], 400)
+fit_y = lorentzian(fit_x, x0, w, amp)
+ss_res = np.sum((y_data - lorentzian(x_data, x0, w, amp)) ** 2)
+r2 = 1 - ss_res / np.sum((y_data - y_data.mean()) ** 2)
+
+# ── Overlay results on the live plot ──────────────────────────────────
+plotter.show_analysis([
+    PostResult(
+        name="Lorentzian Fit",
+        traces=[{"x": fit_x, "y": fit_y, "name": "fit", "dash": "dot"}],
+        vlines=[{"name": "peak",  "x": x0}],
+        hlines=[{"name": "½ max", "y": amp / 2}],
+        points=[{"name": "peak",  "x": x0, "y": amp}],
+        boxes= [{"name": "FWHM",  "x0": x0 - w, "x1": x0 + w,
+                                  "y0": 0.0,     "y1": amp / 2}],
+        railpanel={"peak x": round(x0, 4), "FWHM": round(2 * w, 4), "R²": round(r2, 4)},
+    ),
+])
+```
+
+The plot updates in the browser within 500 ms. The rail shows the **Lorentzian Fit** section with sub-groups for VLines, HLines, Points, Boxes, and the KV rows from `railpanel`.
+
+**Multiple results on different subplots:**
+
+```python
+plotter.show_analysis([
+    PostResult(name="Fit",       subplot=0, traces=[...], railpanel={"R²": 0.997}),
+    PostResult(name="Threshold", subplot=1, hlines=[{"name": "limit", "y": 3.0}]),
+])
+```
+
+Each `PostResult` gets its own colour (auto-assigned from the palette) and its own collapsible section in the rail. Calling `show_analysis()` again replaces the overlay entirely — safe to call in a loop while iterating fits.
+
+**Demo:** `python examples/demo_plot_scenarios.py 17`
+
+---
+
 ### Background Monitoring
 
 Run monitoring in the background so you can change parameters from other cells:
@@ -2468,6 +2529,53 @@ plotter = DashPlotter(
 
 ---
 
+### PostResult
+
+```python
+from orchid import PostResult
+```
+
+Describes one post-experiment analysis result to overlay on a live plot after `runner.run()` completes. Pass a list of `PostResult` objects to `plotter.show_analysis()`.
+
+| Argument     | Type                    | Default  | Description |
+|--------------|-------------------------|----------|-------------|
+| `name`       | `str`                   | required | Section header in the rail panel and label for this analysis |
+| `subplot`    | `int`                   | `0`      | Default subplot index (0-based) for all elements. Individual elements can override with their own `"subplot"` key |
+| `color`      | `str` or `None`         | `None`   | Colour for all elements. Auto-assigned from the built-in 8-colour palette by result index when `None` |
+| `traces`     | `list[dict]` or `None`  | `None`   | Overlay line traces. Each dict: `{"x", "y", "name"?, "subplot"?, "dash"?, "width"?, "mode"?}` |
+| `vlines`     | `list[dict]` or `None`  | `None`   | Vertical lines. Each dict: `{"name": str, "x": float, "subplot"?: int}`. A chip annotation with the name and x-value appears at the top of the subplot |
+| `hlines`     | `list[dict]` or `None`  | `None`   | Horizontal lines. Each dict: `{"name": str, "y": float, "subplot"?: int}`. A chip annotation with the name and y-value appears at the left edge of the subplot |
+| `points`     | `list[dict]` or `None`  | `None`   | Scatter points. Each dict: `{"name": str, "x": float, "y": float, "subplot"?: int}`. The list index (0, 1, 2…) is shown as a label on the plot marker |
+| `boxes`      | `list[dict]` or `None`  | `None`   | Filled rectangles. Each dict: `{"name": str, "x0", "x1", "y0", "y1": float, "subplot"?: int}`. The list index is shown as a label at the box centre |
+| `railpanel`  | `dict` or `None`        | `None`   | Arbitrary `{label: value}` rows shown at the bottom of the rail section |
+
+All geometric elements (vlines, hlines, points, boxes, traces) work on any subplot type — line, heatmap, live_trace, or trace_heatmap — because they are drawn in axis coordinate space.
+
+Calling `show_analysis()` a second time cleanly replaces the previous overlay.
+
+**Example:**
+
+```python
+from orchid import PostResult
+
+fit_x = np.linspace(-1.0, 0.0, 300)
+fit_y = lorentzian(fit_x, x0=-0.40, width=0.08)
+
+plotter.show_analysis([
+    PostResult(
+        name="Lorentzian Fit",
+        traces=[{"x": fit_x, "y": fit_y, "name": "fit", "dash": "dot"}],
+        vlines=[{"name": "peak",      "x": -0.40}],
+        hlines=[{"name": "½ max",     "y": 0.50}],
+        points=[{"name": "peak",      "x": -0.40, "y": 1.00}],
+        boxes =[{"name": "FWHM",      "x0": -0.48, "x1": -0.32, "y0": 0.0, "y1": 0.5}],
+        railpanel={"peak x": -0.40, "FWHM": 0.16, "R²": 0.998},
+    ),
+])
+```
+
+---
+
 ### PlotSpec
 
 ```python
@@ -2532,6 +2640,7 @@ Override `on_data_changed()` to push updates to your server after each data writ
 | `update_plane(outer_index, data, sweep_values)`| After each 2D plane completes                                               |
 | `update_monitor(sample_idx, data, timestamp)`  | After each monitor sample. `x="_time"` auto-scales to s/min/hr from zero.  |
 | `notify_event(timestamp, param, value)`        | Add a diamond marker to the event strip and log entry to the rail sidebar   |
+| `show_analysis(results)`                       | Overlay post-experiment analysis on the plot. No-op in base; `DashPlotter` overrides. See [`PostResult`](#postresult). |
 | `finalize()`                                   | Mark experiment done (stops polling; server stays up for zoom/pan)          |
 | `stop()`                                       | *(abstract)* Stop server, free resources                                    |
 | `is_running` *(property)*                      | *(abstract)* `True` if the server is running                                |
@@ -2595,6 +2704,7 @@ Available `theme` values: `"orchid"` (default), `"t1000"`, `"vitsoe"`, `"modern"
 | `stop()`          | Shut down the Dash server and free the port. Called automatically by the runner after each run. |
 | `is_running`      | `True` if the Dash server thread is alive                                                       |
 | `set_run_info(data_dir, experiment_id=None)` | Called automatically by the runner to display the save path in the header. Pass `None` for `write_mode=NONE`. |
+| `show_analysis(results)` | Overlay post-experiment analysis on the live plot. `results` is a `list[PostResult]`. See [Post-experiment analysis](#post-experiment-analysis-overlay). |
 
 **Reusable across experiments:** `setup()` resets figure state but keeps the server alive, so the browser reconnects without a page reload. Call `stop()` manually to free the port entirely.
 
@@ -2637,6 +2747,52 @@ plotter.stop()  # shut down server to free port (optional)
 ```
 
 Requires `plotly` and `dash` (included in the default dependencies).
+
+#### Post-experiment analysis overlay
+
+After `runner.run()` returns, call `show_analysis()` to overlay fit curves, annotated lines, scatter points, and shaded regions on the existing live plot. The server is still running — the browser updates on the next 500 ms poll.
+
+```python
+data_dir = runner.run(proc, plotter=plotter)
+
+fit_x, fit_y = compute_fit(data_dir)   # your analysis code
+
+plotter.show_analysis([
+    PostResult(
+        name="Peak Fit",
+        traces=[{"x": fit_x, "y": fit_y, "name": "fit", "dash": "dot"}],
+        vlines=[{"name": "peak",  "x": x0}],
+        hlines=[{"name": "½ max", "y": amp / 2}],
+        points=[{"name": "peak",  "x": x0, "y": amp}],
+        boxes= [{"name": "FWHM",  "x0": x0 - w, "x1": x0 + w,
+                                  "y0": 0.0, "y1": amp / 2}],
+        railpanel={"peak x": x0, "FWHM": 2 * w, "R²": r2},
+    ),
+])
+```
+
+**What appears on the plot:**
+
+| Element  | Rendered as | Annotation |
+|----------|-------------|------------|
+| `traces` | Dashed overlay scatter | Legend entry |
+| `vlines` | Dashed vertical line spanning subplot height | Chip at top: name + x-value |
+| `hlines` | Dashed horizontal line spanning subplot width | Chip at left: name + y-value |
+| `points` | Scatter markers with list-index text labels | — |
+| `boxes`  | Filled rectangle (15 % opacity) with list-index label at centre | — |
+
+**What appears in the rail:** A section per `PostResult`, showing sub-groups for each element type, individual entries with their coordinates, and any `railpanel` KV rows at the bottom. Chip and dot colours match the `color` assigned to that `PostResult`.
+
+**Multiple results** stack as separate rail sections and can target different subplots:
+
+```python
+plotter.show_analysis([
+    PostResult(name="Fit",  subplot=0, traces=[...], railpanel={"R²": 0.998}),
+    PostResult(name="QC",   subplot=1, hlines=[{"name": "threshold", "y": 3.0}]),
+])
+```
+
+Calling `show_analysis()` again replaces the entire previous overlay cleanly.
 
 ---
 

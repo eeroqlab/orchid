@@ -599,3 +599,31 @@ body {
 .modebar-btn path { fill: var(--ink-mute) !important; }
 .modebar-btn:hover path { fill: var(--ink) !important; }
 .modebar-btn.active path { fill: var(--accent) !important; }
+
+/* ── Analysis panel ──────────────────────────────────────────────────── */
+.lp-analysis-sub {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding: 6px 0 2px;
+}
+.lp-analysis-item {
+  padding-left: 0;
+}
+.lp-analysis-idx {
+  font-family: monospace;
+  font-size: 13px;
+  font-weight: 600;
+  flex-shrink: 0;
+  width: 18px;
+}
+.lp-analysis-divider {
+  height: 1px;
+  background: var(--hairline);
+  margin: 6px 12px;
+}
+.lp-analysis-dot {
+  flex-shrink: 0;
+}

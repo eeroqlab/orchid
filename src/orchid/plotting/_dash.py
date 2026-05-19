@@ -32,7 +32,10 @@ def _lp_line_trace_info(plotter) -> list[tuple[str, str]]:
     result = []
     scatter_idx = 0
     strip_idx = getattr(plotter, '_strip_trace_idx', None)
+    analysis_start = getattr(plotter, '_analysis_trace_start_idx', None)
     n_data = strip_idx if strip_idx is not None else len(plotter._fig_dict["data"])
+    if analysis_start is not None:
+        n_data = min(n_data, analysis_start)
     for i, ptype in enumerate(plotter._resolved_types):
         offset = plotter._trace_offsets[i]
         n_next = (plotter._trace_offsets[i + 1]
@@ -62,7 +65,8 @@ def _lp_has_rail(plotter) -> bool:
     has_traces = bool(_lp_line_trace_info(plotter))
     has_instruments = bool(plotter.instrument_info)
     has_events = bool(getattr(plotter, '_events', None))
-    return has_sweeps or has_readouts or has_traces or has_instruments or has_events
+    has_analysis = bool(getattr(plotter, '_analysis_results', None))
+    return has_sweeps or has_readouts or has_traces or has_instruments or has_events or has_analysis
 
 
 def _lp_rail_children(plotter) -> list:
@@ -193,6 +197,93 @@ def _lp_rail_children(plotter) -> list:
             html.Div(html.Span("Instruments", className="lp-group-title"),
                      className="lp-group-head"),
             *rows,
+        ]))
+
+    # ── Analysis group ────────────────────────────────────────────────
+    analysis_results = getattr(plotter, '_analysis_results', None) or []
+    for ri, pr in enumerate(analysis_results):
+        color = pr.color or _EV_PALETTE[ri % len(_EV_PALETTE)]
+        section_rows = []
+
+        # VLines
+        if pr.vlines:
+            section_rows.append(html.Div("VLines", className="lp-analysis-sub"))
+            for vl in pr.vlines:
+                section_rows.append(html.Div([
+                    html.Span(vl["name"], className="lp-kv-k"),
+                    html.Span(f"x = {vl['x']:.4g}", className="lp-kv-v"),
+                ], className="lp-kv lp-analysis-item"))
+
+        # HLines
+        if pr.hlines:
+            section_rows.append(html.Div("HLines", className="lp-analysis-sub"))
+            for hl in pr.hlines:
+                section_rows.append(html.Div([
+                    html.Span(hl["name"], className="lp-kv-k"),
+                    html.Span(f"y = {hl['y']:.4g}", className="lp-kv-v"),
+                ], className="lp-kv lp-analysis-item"))
+
+        # Points
+        if pr.points:
+            section_rows.append(html.Div([
+                html.Span("Points", className="lp-analysis-sub", style={"flex": "1"}),
+                html.Span(f"({len(pr.points)})", className="lp-group-right"),
+            ], style={"display": "flex", "alignItems": "baseline"}))
+            for pi, pt in enumerate(pr.points):
+                section_rows.append(html.Div([
+                    html.Div([
+                        html.Span(str(pi), className="lp-analysis-idx", style={"color": color}),
+                        html.Span(pt["name"], className="lp-kv-k",
+                                  style={"maxWidth": "none", "flex": "1"}),
+                    ], style={"display": "flex", "alignItems": "baseline",
+                              "gap": "5px", "flex": "1"}),
+                    html.Span(f"{pt['x']:.4g},  {pt['y']:.4g}", className="lp-kv-v"),
+                ], className="lp-kv lp-analysis-item"))
+
+        # Boxes
+        if pr.boxes:
+            section_rows.append(html.Div([
+                html.Span("Boxes", className="lp-analysis-sub", style={"flex": "1"}),
+                html.Span(f"({len(pr.boxes)})", className="lp-group-right"),
+            ], style={"display": "flex", "alignItems": "baseline"}))
+            for bi, box in enumerate(pr.boxes):
+                section_rows.append(html.Div([
+                    html.Div([
+                        html.Span(str(bi), className="lp-analysis-idx", style={"color": color}),
+                        html.Span(box["name"], className="lp-kv-k",
+                                  style={"maxWidth": "none", "flex": "1"}),
+                    ], style={"display": "flex", "alignItems": "baseline",
+                              "gap": "5px", "flex": "1"}),
+                    html.Div([
+                        html.Div(f"x  {box['x0']:.4g} → {box['x1']:.4g}", className="lp-kv-v"),
+                        html.Div(f"y  {box['y0']:.4g} → {box['y1']:.4g}", className="lp-kv-v"),
+                    ]),
+                ], className="lp-kv lp-analysis-item"))
+
+        # railpanel KV rows
+        if pr.railpanel:
+            for k, v in pr.railpanel.items():
+                if isinstance(v, float):
+                    v_str = f"{v:.4g}"
+                else:
+                    v_str = str(v)
+                section_rows.append(html.Div([
+                    html.Span(k, className="lp-kv-k"),
+                    html.Span(v_str, className="lp-kv-v"),
+                ], className="lp-kv lp-analysis-item"))
+
+        sub_badge = f"[sub {pr.subplot}]" if pr.subplot > 0 else ""
+        children.append(html.Div([
+            html.Div([
+                html.Span(style={"background": color, "borderRadius": "50%",
+                                 "width": "8px", "height": "8px",
+                                 "display": "inline-block", "flexShrink": "0"},
+                          className="lp-analysis-dot"),
+                html.Span(pr.name, className="lp-group-title",
+                          style={"marginLeft": "6px", "flex": "1"}),
+                html.Span(sub_badge, className="lp-group-right"),
+            ], className="lp-group-head"),
+            *section_rows,
         ]))
 
     # ── Events group ──────────────────────────────────────────────────
@@ -433,6 +524,8 @@ class DashPlotter(PlotterBase):
         self._event_selection: list = []
         self._strip_trace_idx: int | None = None
         self._param_colors: dict[str, str] = {}
+        self._analysis_results: list = []
+        self._analysis_trace_start_idx: int | None = None
 
         # Poll-version counter — Dash reads these in the refresh() callback
         self._data_version = 0
@@ -453,6 +546,8 @@ class DashPlotter(PlotterBase):
         self._event_selection = []
         self._strip_trace_idx = None
         self._param_colors = {}
+        self._analysis_results = []
+        self._analysis_trace_start_idx = None
         super().setup(proc)
 
     # ── Rail data caching ──────────────────────────────────────────────
@@ -662,6 +757,196 @@ class DashPlotter(PlotterBase):
             })
         layout["shapes"] = shapes
         self._data_version += 1
+
+    def show_analysis(self, results: list) -> None:
+        """Overlay analysis traces, lines, points, and boxes on the live plot.
+
+        Parameters
+        ----------
+        results : list of PostResult
+            One or more analysis results. Each is rendered as its own rail
+            section. Call after ``runner.run()`` completes.
+        """
+        self._analysis_results = list(results)
+        if self._fig_dict is None:
+            return
+
+        from ._themes import THEMES
+        _theme = THEMES.get(self._current_theme, THEMES["orchid"])
+        _chip_bg   = _theme["panel"]
+        _chip_ink  = _theme["ink"]
+        _chip_mute = _theme["ink_faint"]
+
+        layout = self._fig_dict["layout"]
+
+        # Remove any previous analysis elements
+        layout["shapes"] = [s for s in layout.get("shapes", []) if not s.get("_analysis")]
+        layout["annotations"] = [a for a in layout.get("annotations", []) if not a.get("_analysis")]
+        # Remove previous analysis traces
+        if self._analysis_trace_start_idx is not None:
+            self._fig_dict["data"] = self._fig_dict["data"][:self._analysis_trace_start_idx]
+
+        self._analysis_trace_start_idx = len(self._fig_dict["data"])
+        shapes = list(layout.get("shapes", []))
+        annotations = list(layout.get("annotations", []))
+
+        def _xref(sub: int) -> str:
+            return "x" if sub == 0 else f"x{sub + 1}"
+
+        def _yref(sub: int) -> str:
+            return "y" if sub == 0 else f"y{sub + 1}"
+
+        def _ydomain(sub: int) -> list:
+            key = "yaxis" if sub == 0 else f"yaxis{sub + 1}"
+            return list(layout.get(key, {}).get("domain", [0.0, 1.0]))
+
+        def _xdomain(sub: int) -> list:
+            key = "xaxis" if sub == 0 else f"xaxis{sub + 1}"
+            return list(layout.get(key, {}).get("domain", [0.0, 1.0]))
+
+        for ri, pr in enumerate(results):
+            color = pr.color or _EV_PALETTE[ri % len(_EV_PALETTE)]
+            default_sub = pr.subplot
+
+            # ── Traces ────────────────────────────────────────────────
+            for t in (pr.traces or []):
+                sub = t.get("subplot", default_sub)
+                self._fig_dict["data"].append({
+                    "type": "scatter",
+                    "x": list(t["x"]),
+                    "y": list(t["y"]),
+                    "name": t.get("name", pr.name),
+                    "mode": t.get("mode", "lines"),
+                    "xaxis": _xref(sub),
+                    "yaxis": _yref(sub),
+                    "line": {
+                        "color": t.get("color", color),
+                        "width": t.get("width", 2),
+                        "dash":  t.get("dash", "dot"),
+                    },
+                    "showlegend": True,
+                    "_analysis": True,
+                })
+
+            # ── VLines ────────────────────────────────────────────────
+            for vl in (pr.vlines or []):
+                sub = vl.get("subplot", default_sub)
+                yd = _ydomain(sub)
+                shapes.append({
+                    "_analysis": True,
+                    "type": "line",
+                    "xref": _xref(sub), "yref": "paper",
+                    "x0": vl["x"], "x1": vl["x"],
+                    "y0": yd[0], "y1": yd[1],
+                    "line": {"color": color, "width": 1.5, "dash": "dash"},
+                })
+                chip_text = (
+                    f"<span style='font-size:9px;color:{_chip_mute};"
+                    f"text-transform:uppercase;letter-spacing:0.06em'>"
+                    f"{vl['name']}</span><br>"
+                    f"<b style='color:{_chip_ink}'>x = {vl['x']:.4g}</b>"
+                )
+                annotations.append({
+                    "_analysis": True,
+                    "xref": _xref(sub), "yref": "paper",
+                    "x": vl["x"], "y": yd[1],
+                    "text": chip_text,
+                    "showarrow": True,
+                    "arrowhead": 0, "arrowwidth": 1,
+                    "arrowcolor": color, "arrowside": "none",
+                    "ax": 0, "ay": 4, "axref": "pixel", "ayref": "pixel",
+                    "xanchor": "center", "yanchor": "top",
+                    "bgcolor": _chip_bg,
+                    "bordercolor": color, "borderwidth": 1.5, "borderpad": 5,
+                    "align": "left",
+                    "font": {"family": "ui-monospace, monospace", "size": 10,
+                             "color": _chip_ink},
+                })
+
+            # ── HLines ────────────────────────────────────────────────
+            for hl in (pr.hlines or []):
+                sub = hl.get("subplot", default_sub)
+                xd = _xdomain(sub)
+                shapes.append({
+                    "_analysis": True,
+                    "type": "line",
+                    "xref": "paper", "yref": _yref(sub),
+                    "x0": xd[0], "x1": xd[1],
+                    "y0": hl["y"], "y1": hl["y"],
+                    "line": {"color": color, "width": 1.5, "dash": "dash"},
+                })
+                chip_text = (
+                    f"<span style='font-size:9px;color:{_chip_mute};"
+                    f"text-transform:uppercase;letter-spacing:0.06em'>"
+                    f"{hl['name']}</span><br>"
+                    f"<b style='color:{_chip_ink}'>y = {hl['y']:.4g}</b>"
+                )
+                annotations.append({
+                    "_analysis": True,
+                    "xref": "paper", "yref": _yref(sub),
+                    "x": xd[0], "y": hl["y"],
+                    "text": chip_text,
+                    "showarrow": True,
+                    "arrowhead": 0, "arrowwidth": 1,
+                    "arrowcolor": color, "arrowside": "none",
+                    "ax": 6, "ay": 0, "axref": "pixel", "ayref": "pixel",
+                    "xanchor": "left", "yanchor": "middle",
+                    "bgcolor": _chip_bg,
+                    "bordercolor": color, "borderwidth": 1.5, "borderpad": 5,
+                    "align": "left",
+                    "font": {"family": "ui-monospace, monospace", "size": 10,
+                             "color": _chip_ink},
+                })
+
+            # ── Points (grouped by subplot into one trace each) ───────
+            from collections import defaultdict
+            pts_by_sub: dict[int, list] = defaultdict(list)
+            for pi, pt in enumerate(pr.points or []):
+                sub = pt.get("subplot", default_sub)
+                pts_by_sub[sub].append((pi, pt))
+            for sub, pt_list in pts_by_sub.items():
+                xs = [p["x"] for _, p in pt_list]
+                ys = [p["y"] for _, p in pt_list]
+                labels = [str(i) for i, _ in pt_list]
+                self._fig_dict["data"].append({
+                    "type": "scatter",
+                    "x": xs, "y": ys,
+                    "mode": "markers+text",
+                    "text": labels,
+                    "textposition": "top center",
+                    "name": f"{pr.name} points",
+                    "xaxis": _xref(sub), "yaxis": _yref(sub),
+                    "marker": {"color": color, "size": 10, "symbol": "circle"},
+                    "showlegend": True,
+                    "_analysis": True,
+                })
+
+            # ── Boxes ────────────────────────────────────────────────
+            for bi, box in enumerate(pr.boxes or []):
+                sub = box.get("subplot", default_sub)
+                shapes.append({
+                    "_analysis": True,
+                    "type": "rect",
+                    "xref": _xref(sub), "yref": _yref(sub),
+                    "x0": box["x0"], "x1": box["x1"],
+                    "y0": box["y0"], "y1": box["y1"],
+                    "line": {"color": color, "width": 1.5},
+                    "fillcolor": color,
+                    "opacity": 0.15,
+                })
+                annotations.append({
+                    "_analysis": True,
+                    "xref": _xref(sub), "yref": _yref(sub),
+                    "x": (box["x0"] + box["x1"]) / 2,
+                    "y": (box["y0"] + box["y1"]) / 2,
+                    "text": str(bi),
+                    "showarrow": False,
+                    "font": {"size": 11, "color": color},
+                })
+
+        layout["shapes"] = shapes
+        layout["annotations"] = annotations
+        self.on_data_changed()
 
     # ── PlotterBase interface ──────────────────────────────────────────
 
