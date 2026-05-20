@@ -8,7 +8,7 @@ from .controller import (
 from .bench import Bench
 from .procedure import ErrorPolicy, MonitorProcedure, MultiSweep, Procedure, Sweep, WriteMode
 from .runner import ExperimentRunner
-from .plotting import EventLineConfig, LivePlotter, DashPlotter, PlotterBase, PlotSpec, PostResult
+from .plotting import EventLineConfig, LivePlotter, DashPlotter, BrowseApp, PlotterBase, PlotSpec, PostResult
 from .control_panel import ControlPanel
 from .utils import apply_theme, read_events, read_limit_log, read_metadata, read_procedure, update_metadata, PALETTE
 
@@ -35,6 +35,7 @@ __all__ = [
     "EventLineConfig",
     "PlotterBase",
     "DashPlotter",
+    "BrowseApp",
     "LivePlotter",
     "PlotSpec",
     "PostResult",

@@ -15,6 +15,7 @@ from ._spec import (
     _format_eta,
 )
 from ._base import PlotterBase
+from ._registry import _port_registry, _json_encode
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -446,23 +447,6 @@ def _lp_header(proc_name: str, theme_name: str, plotter) -> object:
 # ══════════════════════════════════════════════════════════════════════
 #  Static save / load helpers
 # ══════════════════════════════════════════════════════════════════════
-
-import numpy as _np
-
-# Port → DashPlotter instance.  Lets _start_server auto-stop any previous
-# plotter on the same port so DashPlotter.load() / DashPlotter() can be
-# called repeatedly in a notebook without "Address already in use" errors.
-_port_registry: dict[int, "DashPlotter"] = {}
-
-
-def _json_encode(x):
-    """JSON ``default`` handler: converts numpy arrays and scalars to Python types."""
-    if isinstance(x, _np.ndarray):
-        return x.tolist()
-    if isinstance(x, _np.generic):   # np.float32, np.int64, etc.
-        return x.item()
-    raise TypeError(f"Object of type {type(x).__name__} is not JSON serializable")
-
 
 # ══════════════════════════════════════════════════════════════════════
 #  DashPlotter — Dash/Werkzeug backend (poll-based)
@@ -1056,8 +1040,10 @@ class DashPlotter(PlotterBase):
         config = {
             "version": 2,
             "meta": {
-                "proc_name": self._proc.name if self._proc else "unknown",
-                "elapsed":   self._final_elapsed,
+                "proc_name":     self._proc.name if self._proc else "unknown",
+                "elapsed":       self._final_elapsed,
+                "timestamp":     self._start_time,
+                "experiment_id": getattr(self, '_experiment_id', None),
             },
             "specs": [s.to_dict() for s in self.specs],
             "plotter": {
@@ -1150,6 +1136,39 @@ class DashPlotter(PlotterBase):
 
         plotter._start_server()
         return plotter
+
+    @classmethod
+    def browse(cls, root_dir, *, port: int = 8053, theme: str = "orchid") -> "BrowseApp":
+        """Open a browser-based experiment gallery for all runs under *root_dir*.
+
+        Scans *root_dir* recursively for directories containing
+        ``plotter_config.yaml``.  Clicking an entry reconstructs the
+        experiment's figure and rail inline — identical to how
+        ``DashPlotter.load()`` would look, but embedded in the browser.
+
+        Parameters
+        ----------
+        root_dir : str or Path
+            Root directory to scan for saved experiment directories.
+        port : int
+            Port for the browse server.  Default 8053.
+        theme : str
+            Initial UI theme.  Same options as DashPlotter.
+
+        Returns
+        -------
+        BrowseApp
+            Running server instance.  Call ``.stop()`` to shut it down.
+
+        Example::
+
+            browser = DashPlotter.browse("~/experiments/")
+            browser.stop()
+        """
+        from ._browse import BrowseApp   # deferred — avoids import-time coupling
+        app = BrowseApp(root_dir=Path(root_dir), port=port, theme=theme)
+        app._start_server()
+        return app
 
     def on_data_changed(self) -> None:
         """Increment the poll-version counter so Dash sends the next update."""
