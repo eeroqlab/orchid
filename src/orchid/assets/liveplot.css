@@ -649,3 +649,127 @@ body {
 .lp-analysis-dot {
   flex-shrink: 0;
 }
+
+/* ════════════════════════════════════════════════════════════════════════
+   Orchid Experiment Browser  (DashPlotter.browse)
+   Reuses live-plotter classes (.lp-rail, .lp-panel, .lp-plots, .lp-kv …).
+   New classes prefixed lp-br- cover only browse-specific additions.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ── Top-level grid: narrow left col | wide right col ────────────── */
+.lp-br-body {
+  display: grid;
+  grid-template-columns: var(--d-rail) 1fr;
+  gap: var(--d-gap);
+  padding: var(--d-pad);
+  height: calc(100vh - var(--d-header));
+  overflow: hidden;
+}
+
+/* ── Left column: selector (flex:1) stacked above info panel ─────── */
+.lp-br-left-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--d-gap);
+  height: 100%;           /* fill grid row height */
+  min-height: 0;
+  overflow: hidden;
+}
+/* Selector rail fills available height */
+.lp-br-left-col .lp-br-left { flex: 1 1 0; min-height: 0; }
+/* Info panel natural height, scrolls internally */
+.lp-br-info-panel { flex-shrink: 0; overflow-y: auto; }
+
+/* ── Selector rail inner layout ───────────────────────────────────── */
+.lp-br-left {
+  overflow: hidden;
+  padding: 14px 0 0;
+  gap: 0;
+}
+.lp-br-left-inner {
+  display: flex; flex-direction: column;
+  height: 100%;
+}
+.lp-br-left .lp-group-head { padding: 0 14px 6px; flex-shrink: 0; }
+
+/* ── Search input ─────────────────────────────────────────────────── */
+.lp-br-search {
+  margin: 6px 14px 8px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 12px;
+  outline: none;
+  flex-shrink: 0;
+  width: calc(100% - 28px);
+  box-sizing: border-box;
+}
+.lp-br-search:focus { border-color: var(--accent); }
+
+/* ── Experiment list ──────────────────────────────────────────────── */
+.lp-br-list { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+.lp-br-empty {
+  padding: 20px 14px;
+  font-size: 11px; color: var(--ink-faint);
+  white-space: pre-wrap; line-height: 1.6;
+}
+
+/* ── Entry cards ──────────────────────────────────────────────────── */
+.lp-br-entry {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--hairline);
+  cursor: pointer; transition: background .10s;
+}
+.lp-br-entry:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.lp-br-entry-sel {
+  background: var(--accent-soft);
+  border-left: 3px solid var(--accent);
+  padding-left: 11px;
+}
+.lp-br-entry-top {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 3px;
+}
+.lp-br-entry-name {
+  font-size: 13px; font-weight: 500; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0; flex: 1;
+}
+.lp-br-entry-sel .lp-br-entry-name { color: var(--accent); }
+.lp-br-entry-meta { display: flex; justify-content: space-between; align-items: baseline; }
+.lp-br-entry-date    { font-size: 10px; color: var(--ink-faint); font-family: var(--mono); }
+.lp-br-entry-elapsed { font-size: 11px; color: var(--ink-mute);  font-family: var(--mono); }
+
+/* ── Right column: mirrors lp-body (plots + optional rail) ───────── */
+.lp-br-right-col {
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;   /* single row fills the full column height */
+  gap: var(--d-gap);
+  min-width: 0;
+  overflow: hidden;
+}
+.lp-br-right-col:has(.lp-rail) {
+  grid-template-columns: 1fr var(--d-rail);
+}
+/* lp-plots inside browse needs a defined height to let flex children grow */
+.lp-br-right-col .lp-plots {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ── Info panel content ───────────────────────────────────────────── */
+.lp-br-info-name {
+  font-size: 14px; font-weight: 500; color: var(--ink);
+  margin-bottom: 8px; word-break: break-word;
+}
+/* Path row wraps instead of truncating */
+.lp-kv-path { align-items: flex-start; }
+.lp-kv-path .lp-kv-k { padding-top: 2px; flex-shrink: 0; }
+.lp-br-info-path {
+  font-family: var(--mono); font-size: 10px;
+  text-align: right; word-break: break-all;
+}
