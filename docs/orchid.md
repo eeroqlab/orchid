@@ -29,6 +29,7 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [Virtual Controllers](#virtual-controllers)
   - [Controller Event Logging](#controller-event-logging)
   - [Post-Experiment Analysis Overlay](#post-experiment-analysis-overlay)
+  - [Experiment Browser](#experiment-browser)
   - [Background Monitoring](#background-monitoring)
   - [Custom Hooks](#custom-hooks)
   - [Mixed Readouts (Scalar + Trace)](#mixed-readouts-scalar--trace)
@@ -52,6 +53,7 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [PlotSpec](#plotspec)
   - [PlotterBase](#plotterbase)
   - [DashPlotter / LivePlotter](#dashplotter--liveplotter)
+  - [BrowseApp](#browseapp)
   - [ControlPanel](#controlpanel)
   - [WriteMode](#writemode)
   - [ErrorPolicy](#errorpolicy)
@@ -369,10 +371,10 @@ bench.add_readout("camera", kind="image", shape=(480, 640),
 | `kind`   | `shape`        | Data per point      | `contains`                                 |
 |----------|----------------|---------------------|--------------------------------------------|
 | `scalar` | not needed     | single `float`      | optional string description                |
-| `trace`  | `(N,)`         | 1D `ndarray`        | optional string description                |
-| `image`  | `(H, W)`       | 2D `ndarray`        | optional `list[str]` of column names for `W` |
+| `trace`  | `(N,)`         | 1D `ndarray`        | optional `list[str]` of element names (enables `y_col`/`z_col` by name) |
+| `image`  | `(H, W)`       | 2D `ndarray`        | optional `list[str]` of column names for `W` (enables `y_col`/`z_col` by name) |
 
-For `IMAGE` readouts, passing `contains` as a `list[str]` (one name per column) lets the `LivePlotter` select a column by name via `z_col` — see [Trace heatmap (VNA)](#trace-heatmap-vna) below.
+For `IMAGE` and `TRACE` readouts, passing `contains` as a `list[str]` lets the `LivePlotter` select an element or column by name via `y_col` or `z_col` — see [Trace heatmap (VNA)](#trace-heatmap-vna) and [`z_col`](#z_col--column-extraction-for-heatmap-and-trace_heatmap-color-axis) below.
 
 #### Virtual Readouts
 
@@ -868,11 +870,12 @@ Every combination of procedure type, readout kind, and plot style is covered. Th
 | 14 | Monitor | `TRACE` | live_trace | **array** | readout name | — | — |
 | 15 | Monitor | `IMAGE` | live_trace (col) | **array** | readout name | `int` or `str` | — |
 | 16 | Monitor | `SCALAR` × N | readout vs readout | readout name | readout name | — | — |
+| 19 | 2D sweep | `TRACE` | heatmap + z_col | inner param | outer param | — | readout / `int` or `str` |
 
 > **Runnable demos:** `examples/demo_plot_scenarios.py` contains one complete simulated experiment per scenario above.
 > Run any of them with:
 > ```
-> python examples/demo_plot_scenarios.py <N>      # N = 1 … 16
+> python examples/demo_plot_scenarios.py <N>      # N = 1 … 19
 > python examples/demo_plot_scenarios.py list     # print the menu
 > ```
 
@@ -909,18 +912,34 @@ bench.add_readout("vna", kind="image", shape=(3, 1601),
 plotter = LivePlotter([PlotSpec(x=flist, y="vna", y_col="mag")])
 ```
 
-#### `z_col` — column extraction for heatmap color axis
+#### `z_col` — column extraction for heatmap and trace_heatmap color axis
 
-`z_col` applies only to `trace_heatmap` plots where the readout is `IMAGE`. It selects which channel becomes the heatmap color. Same int/str semantics as `y_col`.
+`z_col` selects one element or channel from a non-scalar readout for the color (z) axis. The same `int`/`str` semantics as `y_col` apply.
+
+| Plot type | Readout kind | `z_col` behaviour |
+|-----------|--------------|-------------------|
+| `trace_heatmap` | `TRACE` | Not needed — the whole 1D array IS the y-axis; `z_col` is ignored |
+| `trace_heatmap` | `IMAGE` | **Required** — selects which channel (row) becomes the color column |
+| `heatmap` | `SCALAR` | Not applicable |
+| `heatmap` | `TRACE` | Selects which element of the 1D trace becomes the cell color. Defaults to index `0` when `None` |
 
 ```python
-# Accumulate VNA magnitude vs gate voltage as a heatmap
+# trace_heatmap — IMAGE readout, pick the magnitude channel
 plotter = LivePlotter([
     PlotSpec(x="Vgt", y=flist, z="vna", z_col="mag"),
 ])
+
+# heatmap — TRACE readout, pick element 128 (or by name) per cell
+bench.add_readout("lockin", kind="trace", shape=(2,),
+    contains=["X", "Y"], get_func=lockin.read_xy)
+
+plotter = LivePlotter([
+    PlotSpec(x="Vgt", y="fac", z="lockin", z_col="X"),  # in-phase heatmap
+    PlotSpec(x="Vgt", y="fac", z="lockin", z_col="Y"),  # quadrature heatmap
+])
 ```
 
-For `TRACE` readouts (1D array), `z_col` is not needed — the whole array is used automatically.
+**Demo:** `python examples/demo_plot_scenarios.py 19`
 
 ---
 
@@ -1618,6 +1637,47 @@ Each `PostResult` gets its own colour (auto-assigned from the palette) and its o
 
 ---
 
+### Experiment Browser
+
+`DashPlotter.browse()` opens a standalone gallery that scans a directory tree for all saved experiment runs and displays them in a two-panel Dash app — a scrollable sidebar on the left and the full interactive figure on the right. It requires no zarr dependency: every figure is loaded from the `figure.json.gz` snapshot written at run time.
+
+```python
+from orchid import DashPlotter
+
+browser = DashPlotter.browse("~/experiments/")
+# Browser opens at http://localhost:8053 showing all runs under ~/experiments/
+```
+
+The left sidebar lists every experiment found under the root directory, sorted newest-first. Each entry shows the experiment name, date/time, and elapsed duration. A real-time search box filters by name or path as you type. Experiments that are currently live (their port is still serving) display a pulsing indicator.
+
+Clicking an entry loads its figure into the right panel, together with the **event log** and **analysis overlays** that were active when the experiment ended — both are restored from the saved `plotter_config.yaml`. Event selection (click / shift-click / Esc) works exactly as in the live plotter.
+
+```python
+# Keep the browser running and inspect; shut it down when done
+browser.stop()
+```
+
+**Opening on a different port** (e.g. alongside a live experiment on port 8050):
+
+```python
+browser = DashPlotter.browse("~/experiments/", port=8054)
+```
+
+**Switching themes:** The Appearance menu in the browser header works the same as in the live plotter; the selected theme applies to both the chrome and the loaded figure.
+
+**Programmatic stop / restart:**
+
+```python
+browser = DashPlotter.browse("~/experiments/")
+# ...
+browser.stop()
+
+# Calling browse() again on the same port auto-stops the previous instance:
+browser = DashPlotter.browse("~/experiments/")
+```
+
+---
+
 ### Background Monitoring
 
 Run monitoring in the background so you can change parameters from other cells:
@@ -2184,7 +2244,7 @@ A read-only measurement channel backed by a real instrument. Supply either `get_
 | `attr`       | `str` or `None`               | `None`   | Attribute name on the instrument. Used together with `instrument`. |
 | `shape`      | `tuple` or `None`             | `None`   | Required for `TRACE` and `IMAGE`       |
 | `unit`       | `str` or `None`               | `None`   | Physical unit                          |
-| `contains`   | `str`, `list[str]`, or `None` | `None`   | For `IMAGE` readouts: list of column names (e.g. `["f", "mag", "phase"]`) enabling `z_col` string lookup in `PlotSpec`. For other kinds: plain string description. |
+| `contains`   | `str`, `list[str]`, or `None` | `None`   | For `IMAGE` and `TRACE` readouts: list of column/element names (e.g. `["X", "Y"]` or `["f", "mag", "phase"]`) enabling `z_col`/`y_col` string lookup in `PlotSpec`. For `SCALAR`: optional plain string description. |
 
 | Method                              | Description            |
 |-------------------------------------|------------------------|
@@ -2314,7 +2374,7 @@ Register a virtual controller that fans out to all controllers in `gate_names` w
 
 **`add_readout(name, kind, get_func=None, instrument=None, attr=None, shape=None, unit=None, contains=None) -> PhysicalReadout`**
 
-Register a physical measurement readout. `kind` can be a `DataKind` enum or string (`"scalar"`, `"trace"`, `"image"`). Supply either `get_func` **or** `instrument + attr` (the latter is fully serializable by `bench.save()` / `Bench.load()`). `instrument` can be an `InstrumentAdapter` object or the string name of a registered instrument. For `IMAGE` readouts, pass `contains` as a `list[str]` of column names to enable named `z_col` selection in `PlotSpec`.
+Register a physical measurement readout. `kind` can be a `DataKind` enum or string (`"scalar"`, `"trace"`, `"image"`). Supply either `get_func` **or** `instrument + attr` (the latter is fully serializable by `bench.save()` / `Bench.load()`). `instrument` can be an `InstrumentAdapter` object or the string name of a registered instrument. For `IMAGE` and `TRACE` readouts, pass `contains` as a `list[str]` of column/element names to enable named `y_col`/`z_col` string lookup in `PlotSpec`.
 
 **`add_virtual_readout(name, sources, transform, *, kind=DataKind.SCALAR, shape=None, unit=None, contains=None) -> VirtualReadout`**
 
@@ -2604,7 +2664,7 @@ Describes one subplot in a `LivePlotter`.
 | `x`           | `str` or `array-like`              | required  | **str**: sweep parameter name, readout name, or `"_time"` (monitor). **array**: fixed axis values (e.g. frequency list) — triggers `live_trace` auto-detection. |
 | `y`           | `str`, `list[str]`, or `array-like`| required  | **str**: readout name. **list[str]**: multiple readout names overlaid on one subplot. **array**: fixed axis values (e.g. frequency list) — triggers `trace_heatmap` auto-detection. Heatmap: outer sweep parameter name (string). |
 | `z`           | `str` or `None`                    | `None`    | Readout name for color values. Required for `"heatmap"` and `"trace_heatmap"`. |
-| `z_col`       | `int`, `str`, or `None`            | `None`    | Column selector for `IMAGE` or `TRACE` readouts used as `z` (or `y` for `live_trace`). `None` = use whole array (valid for `TRACE`). `int` = column index. `str` = column name looked up in `readout.contains`. |
+| `z_col`       | `int`, `str`, or `None`            | `None`    | Column selector for the color (z) axis. `int` = zero-based index. `str` = column name looked up in `readout.contains`. `None` behaviour depends on context: ignored for `SCALAR`; uses the whole 1D array for `TRACE trace_heatmap`; defaults to column `0` for `TRACE heatmap`; required for `IMAGE` readouts (selects one channel/row). |
 | `plot_type`   | `str`                              | `"auto"`  | `"line"`, `"heatmap"`, `"live_trace"`, `"trace_heatmap"`, or `"auto"` (infer from types of `x` and `y`). |
 | `update_every`| `str`                              | `"sweep"` | `"point"`, `"sweep"`, or `"plane"`               |
 | `update_func` | `callable` or `None`               | `None`    | Custom `(fig_dict, index, data) -> None`         |
@@ -2721,8 +2781,9 @@ Available `theme` values: `"orchid"` (default), `"t1000"`, `"vitsoe"`, `"modern"
 | `is_running`      | `True` if the Dash server thread is alive                                                       |
 | `set_run_info(data_dir, experiment_id=None)` | Called automatically by the runner to display the save path in the header. Pass `None` for `write_mode=NONE`. |
 | `show_analysis(results)` | Overlay post-experiment analysis on the live plot. `results` is a `list[PostResult]`. See [Post-experiment analysis](#post-experiment-analysis-overlay). |
-| `save(data_dir)`  | Save the complete figure and plotter config to `data_dir`. Called automatically by the runner at experiment end. See [Static quickview](#static-quickview). |
-| `DashPlotter.load(data_dir, *, port=None)` | *(classmethod)* Reload a saved figure in a new browser window. See [Static quickview](#static-quickview). |
+| `save(data_dir)`  | Save the complete figure, event log, analysis results, and plotter config to `data_dir`. Called automatically by the runner at experiment end. See [Static quickview](#static-quickview). |
+| `DashPlotter.load(data_dir, *, port=None)` | *(classmethod)* Reload a saved figure in a new browser window. Event log and analysis overlays are restored. See [Static quickview](#static-quickview). |
+| `DashPlotter.browse(root_dir, *, port=8053, theme="orchid")` | *(classmethod)* Open a standalone experiment gallery for all runs under `root_dir`. Returns a `BrowseApp` instance. See [Experiment Browser](#experiment-browser) and [`BrowseApp`](#browseapp). |
 
 **Reusable across experiments:** `setup()` resets figure state but keeps the server alive, so the browser reconnects without a page reload. Call `stop()` manually to free the port entirely.
 
@@ -2828,7 +2889,7 @@ At the end of every run the runner automatically calls `plotter.save(data_dir)`,
 
 | File | Contents |
 |------|----------|
-| `plotter_config.yaml` | Plotter constructor args, `PlotSpec` list, and internal bookkeeping (resolved types, trace offsets, monitor flag, elapsed time). Human-readable. |
+| `plotter_config.yaml` | Plotter constructor args, `PlotSpec` list, internal bookkeeping (resolved types, trace offsets, monitor flag, elapsed time), event log, parameter colours, and post-experiment analysis results. Human-readable. |
 | `figure.json.gz` | Complete Plotly figure dict — layout **and** all trace data — gzip-compressed. Self-contained; no zarr dependency at load time. |
 
 To reopen any saved figure in a new notebook or script:
@@ -2840,7 +2901,7 @@ plotter = DashPlotter.load("path/to/data_dir")
 # browser opens at http://localhost:8050 showing the saved figure
 ```
 
-The plot opens in a frozen **Done** state — identical to how it looked when the experiment ended. Theme switching, zoom/pan, and event selection all remain interactive.
+The plot opens in a frozen **Done** state — identical to how it looked when the experiment ended. Theme switching, zoom/pan, and event selection all remain interactive. The event log and any `show_analysis()` overlays that were present at experiment end are fully restored.
 
 **Opening an old run while an experiment is live:**
 
@@ -2866,6 +2927,68 @@ p = DashPlotter.load("run_002")   # auto-stops the previous server on port 8050
 ```
 
 Repeated `load()` calls on the same port silently stop the previous server first — the browser tab refreshes automatically.
+
+---
+
+### BrowseApp
+
+```python
+from orchid import BrowseApp       # or: DashPlotter.browse(...)  → BrowseApp
+```
+
+Standalone experiment gallery server returned by `DashPlotter.browse()`. Scans a root directory tree recursively for saved experiment runs (identified by `plotter_config.yaml`) and renders them in a two-panel Dash interface.
+
+Do **not** construct `BrowseApp` directly — use `DashPlotter.browse()`.
+
+#### Constructor (internal — use `DashPlotter.browse()`)
+
+| Argument   | Type            | Default      | Description                             |
+|------------|-----------------|--------------|-----------------------------------------|
+| `root_dir` | `str` or `Path` | required     | Root directory to scan                  |
+| `port`     | `int`           | `8053`       | TCP port for the gallery server         |
+| `theme`    | `str`           | `"orchid"`   | Initial UI colour theme                 |
+
+#### Methods and properties
+
+| Method / Property | Description |
+|-------------------|-------------|
+| `stop()` | Shut down the gallery server and free the port. |
+
+#### UI layout
+
+```
+┌─ header ──────────────────────────────────────────────────────┐
+│  Orchid  Experiment Browser            [Appearance ▾]         │
+├─ sidebar ────────────────┬─ main ─────────────────────────────┤
+│  Experiments  (42)       │  [name · date · elapsed · path]    │
+│  ┌─ search ────────────┐ │  ┌─────────────────────────────┐   │
+│  └─────────────────────┘ │  │                             │   │
+│  ┌─ entry (selected) ──┐ │  │      figure.json.gz         │   │
+│  │ MyExperiment        │ │  │                             │   │
+│  │ 2026-05-21  04:32   │ │  │   (zoom / pan / hover)      │   │
+│  └─────────────────────┘ │  │                             │   │
+│  ┌─ entry ─────────────┐ │  └─────────────────────────────┘   │
+│  │ ...                 │ │                                    │
+│  └─────────────────────┘ │  [event log + analysis rail]       │
+└──────────────────────────┴────────────────────────────────────┘
+```
+
+- **Sidebar** — sorted newest-first; a real-time search box filters by name or path.
+- **Figure panel** — loads `figure.json.gz` from the selected experiment. Theme switching updates both chrome and plot immediately.
+- **Rail** — shows the restored event log and `PostResult` analysis overlays. Event selection (click / shift-click / Esc) is fully interactive.
+- **Live indicator** — entries whose port is still serving show a pulsing dot.
+- **Auto-refresh** — sidebar rescans and updates every 4 s, picking up new experiments automatically.
+
+#### Example
+
+```python
+from orchid import DashPlotter
+
+browser = DashPlotter.browse("~/experiments/")
+# Opens http://localhost:8053
+
+browser.stop()   # shut down when done
+```
 
 ---
 
@@ -3189,15 +3312,19 @@ Orchid uses [zarro](https://github.com/eeroqlab/zarro) for all data persistence.
 
 ```
 data/0001/
-  vault.zarr/         # Zarr v3 group with all arrays
-    Vgt/              # control values
-    lockin_X/         # measurement data
-    S21/              # trace data
-  metadata.yaml       # status, date, schema, tags, user metadata
-  procedure.yaml      # full procedure spec: sweeps, readouts, settings, hook source
-  events.yaml         # parameter changes during monitor runs (only if any occurred)
-  limit_log.yaml      # controller limit violations (only if any occurred)
+  vault.zarr/            # Zarr v3 group with all arrays
+    Vgt/                 # control values
+    lockin_X/            # measurement data
+    S21/                 # trace data
+  metadata.yaml          # status, date, schema, tags, user metadata
+  procedure.yaml         # full procedure spec: sweeps, readouts, settings, hook source
+  events.yaml            # parameter changes during monitor runs (only if any occurred)
+  limit_log.yaml         # controller limit violations (only if any occurred)
+  plotter_config.yaml    # plotter constructor args, PlotSpec list, event log, analysis results
+  figure.json.gz         # complete Plotly figure dict (layout + data), gzip-compressed
 ```
+
+`plotter_config.yaml` and `figure.json.gz` are written by `plotter.save()`, called automatically by the runner at experiment end (requires `save_plot=True`, the default). They are the source for `DashPlotter.load()` and `DashPlotter.browse()`.
 
 **Metadata includes:** date (ISO 8601), schema, tags, and all user metadata from both the context and the procedure.
 
@@ -3278,5 +3405,10 @@ Live plotting (optional, passed to runner as plotter=...):
     |  (LivePlotter)      |
     |  Werkzeug + Dash    |
     |  dcc.Interval poll  |
-    +---------------------+
+    |  .save(data_dir)   |
+    |  .load(data_dir)   |
+    |  .browse(root_dir) |----> BrowseApp
+    +---------------------+       (gallery server,
+                                   no zarr needed,
+                                   loads figure.json.gz)
 ```

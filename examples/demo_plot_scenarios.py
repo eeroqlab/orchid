@@ -29,6 +29,7 @@ Scenarios
 16  Monitor     / SCALAR×2 / readout vs readout           — lock-in IQ semi-circle
 17  PostResult  / show_analysis overlay                   — fit curve, peak, FWHM box
 18  Monitor     / SCALAR×3   / event logging              — Vgt steps + RF toggle, 3 subplots
+19  Procedure2D / TRACE    / heatmap + z_col              — lock-in X and Y as separate heatmaps
 """
 
 import sys
@@ -879,6 +880,65 @@ def scenario_18():
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  Scenario 19 — Procedure2D / TRACE / heatmap + z_col
+#  Lock-in returns [X, Y] at every (Vgt, fac) point (TRACE readout,
+#  shape (2,)).  Two heatmap subplots are built from the *same* readout
+#  by setting z_col='X' and z_col='Y' on separate PlotSpecs — the case
+#  that required the update_heatmap TRACE-buffer fix.
+# ══════════════════════════════════════════════════════════════════════
+
+def scenario_19():
+    """2D TRACE sweep → two heatmaps from one readout via z_col='X' / z_col='Y'."""
+    bench, state, _ = _make_bench()
+
+    bench.add_controller("Vgt",
+        set_func=lambda v: state.__setitem__("Vgt", v),
+        get_func=lambda: state["Vgt"], unit="V")
+    bench.add_controller("fac",
+        set_func=lambda v: state.__setitem__("fac", v),
+        get_func=lambda: state["fac"], unit="")
+
+    def lockin_xy():
+        """Lock-in [X, Y] — Coulomb-diamond-like pattern in both quadratures."""
+        vgt = state["Vgt"]
+        fac = state["fac"]
+        # X component: two Lorentzians shifting apart with fac (conductance peaks)
+        x = (lorentzian(vgt, x0=-0.5 + 0.40 * fac, width=0.06)
+           + lorentzian(vgt, x0=-0.2 - 0.40 * fac, width=0.06)) + noise(0.02)
+        # Y component: dispersive quadrature — derivative-like, opposite signs
+        y = (lorentzian(vgt, x0=-0.45 + 0.35 * fac, width=0.07, amp= 0.7)
+           - lorentzian(vgt, x0=-0.25 - 0.35 * fac, width=0.07, amp= 0.7)) + noise(0.02)
+        return np.array([x, y])
+
+    bench.add_readout("lockin", kind=DataKind.TRACE, shape=(2,),
+        contains=["X", "Y"], get_func=lockin_xy)
+
+    vgt_vals = np.linspace(-1.0, 0.2, 25)
+    fac_vals = np.linspace(0.0,  1.0, 14)
+
+    proc = Procedure(
+        name="s19_trace_heatmap_zcol",
+        bench=bench,
+        # sweeps[0] = outer (slow) axis; sweeps[-1] = inner (fast) axis
+        sweeps=[Sweep("fac", fac_vals), Sweep("Vgt", vgt_vals)],
+        readouts=["lockin"],
+        settle_time=0.01,
+        write_mode=WriteMode.SWEEPWISE,
+    )
+
+    # Two heatmaps from the same TRACE readout — one per lock-in quadrature.
+    # z_col selects which element of the (n_inner, 2) sweep buffer to colour.
+    spec_X = PlotSpec(x="Vgt", y="fac", z="lockin", z_col="X")
+    spec_Y = PlotSpec(x="Vgt", y="fac", z="lockin", z_col="Y")
+    plotter = _make_plotter(spec_X, spec_Y)
+
+    print("\nScenario 19: 2D TRACE sweep → 2 heatmaps (z_col='X' and z_col='Y')")
+    print("  Both heatmaps come from the same lock-in TRACE readout.")
+    print("  z_col selects the X (in-phase) or Y (quadrature) component per cell.")
+    _run_sweep(proc, plotter)
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  Dispatch table and CLI
 # ══════════════════════════════════════════════════════════════════════
 
@@ -901,6 +961,7 @@ SCENARIOS = {
     16: (scenario_16, "Monitor     / SCALAR×2 / readout vs readout (IQ semi-circle)"),
     17: (scenario_17, "PostResult  / show_analysis — fit curve, peak, FWHM box"),
     18: (scenario_18, "Monitor     / SCALAR×3   / event logging — Vgt steps + RF toggle"),
+    19: (scenario_19, "Procedure2D / TRACE     / heatmap + z_col — lock-in X and Y heatmaps"),
 }
 
 

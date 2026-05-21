@@ -126,9 +126,15 @@ class PlotSpec:
         (channel) axis → 1D array per point for ``live_trace``, scalar per
         point for ``line``.
     z_col : int or str or None
-        Column selector for IMAGE readouts on ``"heatmap"`` and
-        ``"trace_heatmap"`` plots (color axis). Same int/str semantics as
-        ``y_col``. Ignored for SCALAR and TRACE readouts.
+        Column selector for the colour (z) axis.  Same int/str semantics as
+        ``y_col``.  Ignored for SCALAR readouts.
+
+        * **TRACE readout + heatmap**: selects which sample along the trace
+          axis is mapped to colour. Each inner-sweep point delivers a 1-D
+          trace; ``z_col`` picks one element → scalar per cell.  Defaults to
+          index 0 when ``None``.
+        * **IMAGE readout + heatmap / trace_heatmap**: selects a row/channel
+          from the 2-D IMAGE array.
     plot_type : str
         ``"line"``, ``"heatmap"``, ``"live_trace"``, ``"trace_heatmap"``,
         or ``"auto"`` (default).
@@ -175,6 +181,11 @@ class PlotSpec:
     Live trace — VNA magnitude waveform refreshing each gate step::
 
         PlotSpec(x=freqs, y="vna", y_col="mag")
+
+    Heatmap — 2D sweep, TRACE readout (pick one sample per cell)::
+
+        PlotSpec(x="freq_inner", y="Vgt_outer", z="vna", z_col=128)
+        PlotSpec(x="freq_inner", y="Vgt_outer", z="vna", z_col="mag")
 
     Trace heatmap — accumulate VNA magnitude vs gate voltage::
 

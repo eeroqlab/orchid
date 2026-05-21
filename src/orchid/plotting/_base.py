@@ -664,15 +664,43 @@ class PlotterBase(abc.ABC):
             self._fig_dict["data"][trace_idx]["y"] = state["y"][:n]
 
     def update_heatmap(self, spec_idx: int, spec: PlotSpec, index: tuple, data: dict) -> None:
-        """Fill one row or one cell of the heatmap z-matrix."""
+        """Fill one row or one cell of the heatmap z-matrix.
+
+        When the readout is a TRACE (DataKind.TRACE), the sweep buffer delivers
+        ``z_val`` with shape ``(n_inner, n_trace_pts)``.  ``spec.z_col`` then
+        selects which sample along the trace axis maps to the colour value,
+        reducing the array to ``(n_inner,)`` before writing the heatmap row.
+        """
         state = self._sweep_data[spec_idx][0]
         if spec.z not in data or len(index) == 0:
             return
         z_val = data[spec.z]
         row_idx = index[0]
-        if isinstance(z_val, np.ndarray) and z_val.ndim >= 1:
+        if isinstance(z_val, np.ndarray) and z_val.ndim == 2:
+            # TRACE readout: sweep buffer shape is (n_inner, n_trace_pts).
+            # Reduce to (n_inner,) by picking one sample along the trace axis.
+            col: int
+            if spec.z_col is None:
+                col = 0
+            elif isinstance(spec.z_col, int):
+                col = spec.z_col
+            else:
+                # String label — resolve via readout.contains if available.
+                readout = (
+                    self._proc.bench.readouts.get(spec.z)
+                    if hasattr(self._proc, "bench") else None
+                )
+                col = (
+                    _resolve_col(spec.z_col, readout, "z_col")
+                    if readout is not None
+                    else 0
+                )
+            state["z"][row_idx, :] = z_val[:, col]
+        elif isinstance(z_val, np.ndarray) and z_val.ndim == 1:
+            # Normal case: one scalar per inner-sweep point.
             state["z"][row_idx, :] = z_val
         else:
+            # Pointwise scalar update (update_every="point").
             col_idx = index[-1] if len(index) >= 2 else 0
             state["z"][row_idx, col_idx] = z_val
         self._fig_dict["data"][self._trace_offsets[spec_idx]]["z"] = state["z"].tolist()
