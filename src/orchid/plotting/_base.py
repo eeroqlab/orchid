@@ -209,7 +209,7 @@ class PlotterBase(abc.ABC):
                     continue
 
             if ptype == "line":
-                self.update_line(i, spec, data, sweep_values)
+                self.update_line(i, spec, index, data, sweep_values)
                 changed = True
             elif ptype == "heatmap":
                 self.update_heatmap(i, spec, index, data)
@@ -601,7 +601,7 @@ class PlotterBase(abc.ABC):
 
     # ── Data update helpers ────────────────────────────────────────────
 
-    def update_line(self, spec_idx: int, spec: PlotSpec, data: dict, sweep_values: dict) -> None:
+    def update_line(self, spec_idx: int, spec: PlotSpec, index, data: dict, sweep_values: dict) -> None:
         """Update line traces using pre-allocated numpy buffers.
 
         x can be a sweep parameter name or a readout name.
@@ -640,8 +640,12 @@ class PlotterBase(abc.ABC):
             else:
                 x_float = float(x_val) if x_val is not None else float(state["_n"])
                 n = state["_n"]
-                # Reset on new inner sweep — detected by x going back to start
-                if x_from_sweep and n >= 2 and x_float <= state["x"][0]:
+                # Reset on new inner sweep — detected by the innermost index
+                # wrapping back to 0.  The old x-value heuristic
+                # (x_float <= state["x"][0]) fired incorrectly for
+                # reverse=True sweeps, where the return leg descends back to
+                # the start value without a genuine new-sweep boundary.
+                if x_from_sweep and index and index[-1] == 0 and n > 0:
                     state["_n"] = 0
                     n = 0
                 if col is None:
