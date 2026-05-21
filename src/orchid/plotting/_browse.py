@@ -98,7 +98,7 @@ def _reconstruct_frozen_plotter(data_dir: str | Path):
     the raw Plotly figure dict from ``figure.json.gz``.
     """
     import gzip, json, yaml
-    from ._spec import EventLineConfig, PlotSpec
+    from ._spec import EventLineConfig, PlotSpec, PostResult
     from ._dash import DashPlotter
 
     data_dir = Path(data_dir)
@@ -127,6 +127,14 @@ def _reconstruct_frozen_plotter(data_dir: str | Path):
     plotter._final_elapsed            = config["meta"].get("elapsed")
     plotter._fig_dict                 = fig_dict
     plotter._stopped                  = True
+
+    # Restore rail state: events, analysis results, param colours.
+    plotter._events          = config.get("events", [])
+    plotter._param_colors    = config.get("param_colors", {})
+    plotter._event_selection = []
+    plotter._analysis_results = [
+        PostResult(**d) for d in config.get("analysis_results", [])
+    ]
 
     proc_name    = config.get("meta", {}).get("proc_name", "Orchid")
     plotter._proc = type("_ProcStub", (), {"name": proc_name})()
@@ -439,6 +447,11 @@ class BrowseApp:
                     dcc.Interval(id="br-interval", interval=4000, n_intervals=0),
                     dcc.Store(id="br-selected-dir", data=None),
                     dcc.Store(id="br-scan-cache",   data=initial_experiments),
+                    # Event-selection state
+                    dcc.Store(id="br-ev-selected",  data=[]),
+                    dcc.Store(id="br-ev-anchor",    data=None),
+                    dcc.Store(id="br-ev-mods",      data={}),
+                    dcc.Store(id="br-ev-kbd-init",  data=None),
                 ],
             )
 
@@ -498,6 +511,8 @@ class BrowseApp:
             Output("br-plot-rail",    "className"),
             Output("br-selected-dir", "data"),
             Output("br-info-panel",   "children"),
+            Output("br-ev-selected",  "data"),
+            Output("br-ev-anchor",    "data"),
             Input({"type": "br-entry", "dir": ALL}, "n_clicks"),
             State("br-scan-cache",    "data"),
             prevent_initial_call=True,
@@ -506,11 +521,11 @@ class BrowseApp:
             from ._dash import _lp_has_rail, _lp_rail_children
 
             if not all_clicks or not any(all_clicks):
-                return no_update, no_update, no_update, no_update, no_update
+                return no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
             trig = ctx.triggered_id
             if not isinstance(trig, dict) or trig.get("type") != "br-entry":
-                return no_update, no_update, no_update, no_update, no_update
+                return no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
             data_dir = trig["dir"]
             exp      = next(
@@ -524,7 +539,7 @@ class BrowseApp:
                 import traceback
                 traceback.print_exc()
                 err = [html.Div(f"Error loading experiment:\n{exc}", className="lp-br-empty")]
-                return no_update, err, "lp-rail", data_dir, _br_info_children(exp, data_dir)
+                return no_update, err, "lp-rail", data_dir, _br_info_children(exp, data_dir), [], None
 
             # Apply the browse app's current theme to the reconstructed figure.
             plotter._retheme_fig_dict(browse_app._current_theme)
@@ -540,6 +555,8 @@ class BrowseApp:
                 rail_cls,
                 data_dir,
                 _br_info_children(exp, data_dir),
+                [],    # reset event selection
+                None,  # reset shift-click anchor
             )
 
         # ── Callback 3: Theme switch ───────────────────────────────────
@@ -561,6 +578,136 @@ class BrowseApp:
                 new_fig = no_update
             return f"theme-{theme_name}", new_fig
 
+        # ── Clientside: keyboard init + modifier tracking ────────────
+
+        app.clientside_callback(
+            """
+            function(_) {
+                if (window.__br_ev_inited) return window.dash_clientside.no_update;
+                window.__br_ev_inited = true;
+                window.__br_mods = {shift: false, ctrl: false};
+                var upd = function(e) {
+                    window.__br_mods.shift = e.shiftKey;
+                    window.__br_mods.ctrl  = e.ctrlKey || e.metaKey;
+                };
+                document.addEventListener('keydown', upd);
+                document.addEventListener('keyup',   upd);
+                document.addEventListener('keydown', function(e) {
+                    if (e.key !== 'Escape') return;
+                    var ae = document.activeElement;
+                    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
+                    var btn = document.getElementById('lp-ev-clear');
+                    if (btn) btn.click();
+                });
+                return '';
+            }
+            """,
+            Output("br-ev-kbd-init", "data"),
+            Input("br-ev-kbd-init",  "data"),
+        )
+
+        app.clientside_callback(
+            """
+            function(clickData, rowClicks) {
+                var m = window.__br_mods || {shift: false, ctrl: false};
+                return {shift: !!m.shift, ctrl: !!m.ctrl};
+            }
+            """,
+            Output("br-ev-mods", "data"),
+            Input("br-graph",    "clickData"),
+            Input({"type": "lp-ev-row", "id": ALL}, "n_clicks"),
+        )
+
+        # ── Callback 5: Event row / strip click → update selection ────
+
+        @app.callback(
+            Output("br-ev-selected", "data"),
+            Output("br-ev-anchor",   "data"),
+            Input("br-graph",        "clickData"),
+            Input({"type": "lp-ev-row", "id": ALL}, "n_clicks"),
+            Input("lp-ev-clear",     "n_clicks"),
+            State("br-ev-selected",  "data"),
+            State("br-ev-anchor",    "data"),
+            State("br-ev-mods",      "data"),
+            prevent_initial_call=True,
+        )
+        def _br_ev_selection(click_data, row_clicks, clear_n, selected, anchor, mods):
+            p = browse_app._current_plotter
+            if p is None:
+                return no_update, no_update
+
+            trig = ctx.triggered_id
+
+            if trig == "lp-ev-clear" and (clear_n or 0) > 0:
+                p._event_selection = []
+                p._apply_event_selection([])
+                return [], None
+
+            selected = list(selected or [])
+            shift = bool((mods or {}).get("shift"))
+            ctrl  = bool((mods or {}).get("ctrl"))
+
+            clicked_id = None
+            if trig == "br-graph" and click_data:
+                for pt in click_data.get("points", []):
+                    if pt.get("curveNumber") == p._strip_trace_idx:
+                        x_clicked = pt.get("x")
+                        for ev in p._events:
+                            if abs(ev["t_elapsed"] - x_clicked) < 1e-9:
+                                clicked_id = ev["id"]
+                                break
+            elif isinstance(trig, dict) and trig.get("type") == "lp-ev-row":
+                if row_clicks is None or all((c or 0) == 0 for c in row_clicks):
+                    return no_update, no_update
+                clicked_id = trig.get("id")
+
+            if clicked_id is None:
+                return no_update, no_update
+
+            if shift and anchor is not None and anchor != clicked_id and isinstance(trig, dict):
+                ids = [e["id"] for e in p._events]
+                try:
+                    ii, jj = ids.index(anchor), ids.index(clicked_id)
+                except ValueError:
+                    ii, jj = -1, -1
+                if ii >= 0 and jj >= 0:
+                    lo, hi = min(ii, jj), max(ii, jj)
+                    rng  = ids[lo:hi + 1]
+                    seen = set(selected); merged = list(selected)
+                    for r in rng:
+                        if r not in seen:
+                            merged.append(r); seen.add(r)
+                    p._event_selection = merged
+                    p._apply_event_selection(merged)
+                    return merged, clicked_id
+
+            if clicked_id in selected:
+                new_sel = [x for x in selected if x != clicked_id]
+            else:
+                new_sel = selected + [clicked_id]
+            p._event_selection = new_sel
+            p._apply_event_selection(new_sel)
+            return new_sel, clicked_id
+
+        # ── Callback 6: Push rethemed/reselected figure to graph ──────
+
+        @app.callback(
+            Output("br-graph",       "figure",   allow_duplicate=True),
+            Output("br-plot-rail",   "children", allow_duplicate=True),
+            Input("br-ev-selected",  "data"),
+            prevent_initial_call=True,
+        )
+        def _br_ev_to_figure(selected):
+            from ._dash import _lp_has_rail, _lp_rail_children
+            p = browse_app._current_plotter
+            if p is None or p._fig_dict is None:
+                return no_update, no_update
+            # _apply_event_selection already mutated _fig_dict in _br_ev_selection;
+            # we just need to push it and rebuild rail HTML for row highlights.
+            p._event_selection = list(selected or [])
+            rail = _lp_rail_children(p) if _lp_has_rail(p) else no_update
+            return p._fig_dict, rail
+
         # ── Start Werkzeug ────────────────────────────────────────────
 
         prev = _browse_registry.get(self.port)
@@ -581,4 +728,4 @@ class BrowseApp:
         webbrowser.open(f"http://localhost:{self.port}")
         n_found = len(_scan_experiments(self.root_dir))
         print(f"Orchid experiment browser at http://localhost:{self.port}")
-        print(f"  Scanning: {self.root_dir}  ({n_found} experiment(s) found)")
+        # print(f"  Scanning: {self.root_dir}  ({n_found} experiment(s) found)")

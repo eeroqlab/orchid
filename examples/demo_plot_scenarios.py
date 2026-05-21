@@ -95,6 +95,7 @@ class DemoPlotter(DashPlotter):
 def _make_bench() -> tuple[Bench, dict]:
     """Return (bench, state) where state is the shared instrument state dict."""
     data_dir = tempfile.mkdtemp(prefix="orchid_demo_")
+    # data_dir = Path.cwd() / Path("data")
     bench = Bench(data_root=data_dir)
     state = {"Vgt": 0.0, "fac": 0.0}
     return bench, state, data_dir
@@ -710,7 +711,7 @@ def scenario_17():
 
     # Run the experiment
     runner = ExperimentRunner(use_experiment_id=False)
-    runner.run(proc, plotter=plotter)
+    runner.run(proc, plotter=plotter, save_plot=False)
 
     # ── Fake post-experiment analysis ─────────────────────────────────
     # In a real workflow this would be:
@@ -766,6 +767,7 @@ def scenario_17():
         ),
     ])
     print(f"  Analysis done — peak at x={fit_x0:.4f}, FWHM={fwhm:.4f}, R²={r_sq:.4f}")
+    plotter.save(runner._get_data_dir(proc))
 
     _wait_and_close(plotter)
 
