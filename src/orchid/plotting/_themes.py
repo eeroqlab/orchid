@@ -168,7 +168,7 @@ def plotly_template(theme: dict) -> dict:
     )
     return dict(
         paper_bgcolor=theme["panel"],
-        plot_bgcolor=theme["plot_bg"],
+        plot_bgcolor=theme["panel"],
         font=dict(
             family='"Helvetica Neue", Helvetica, Arial, sans-serif',
             color=theme["ink"],

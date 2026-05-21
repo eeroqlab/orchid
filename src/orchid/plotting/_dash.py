@@ -1037,6 +1037,12 @@ class DashPlotter(PlotterBase):
         import dataclasses, gzip, json, yaml
 
         el = self.event_line
+
+        # JSON-round-trip converts any numpy scalars / arrays to Python
+        # natives so yaml.safe_dump can serialise them without error.
+        def _yaml_safe(obj):
+            return json.loads(json.dumps(obj, default=_json_encode))
+
         config = {
             "version": 2,
             "meta": {
@@ -1065,6 +1071,13 @@ class DashPlotter(PlotterBase):
                 "monitor_interval":         getattr(self._proc, "interval", None),
                 "time_unit":                self._time_unit_from_state(),
             },
+            # Rail state — events, analysis, param colours.
+            # JSON-round-tripped to convert any numpy types to Python natives.
+            "events":           _yaml_safe(self._events),
+            "analysis_results": _yaml_safe(
+                [dataclasses.asdict(pr) for pr in self._analysis_results]
+            ),
+            "param_colors":     dict(self._param_colors),
         }
 
         data_dir = Path(data_dir)
@@ -1129,6 +1142,15 @@ class DashPlotter(PlotterBase):
         plotter._final_elapsed            = config["meta"].get("elapsed")
         plotter._fig_dict                 = fig_dict
         plotter._stopped                  = True
+
+        # Restore rail state: events, analysis results, param colours.
+        plotter._events          = config.get("events", [])
+        plotter._param_colors    = config.get("param_colors", {})
+        plotter._event_selection = []
+        from ._spec import PostResult as _PostResult
+        plotter._analysis_results = [
+            _PostResult(**d) for d in config.get("analysis_results", [])
+        ]
 
         # Minimal proc stub so the header shows the original experiment name
         proc_name = config.get("meta", {}).get("proc_name", "Orchid")
