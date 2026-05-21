@@ -651,25 +651,37 @@ class DashPlotter(PlotterBase):
                     if axis.domain:
                         d = list(axis.domain)
                         axis.domain = [d[0] * 0.88, d[1] * 0.88]
-            # yaxis indices 1..n_subplots are used by make_subplots; strip gets n+1
-            n_subplots = len(self.specs)
-            strip_num = n_subplots + 1
-            strip_key = f"yaxis{strip_num}"
-            strip_ref = f"y{strip_num}"
-            fig.update_layout(**{strip_key: dict(
-                domain=[0.91, 1.0], visible=False, range=[-0.1, 1.1],
-                anchor="x",
-            )})
-            self._strip_trace_idx = len(fig.data)
-            fig.add_trace(go.Scatter(
-                x=[], y=[], mode="markers",
-                yaxis=strip_ref,
-                marker=dict(symbol="diamond", size=10,
-                            color=[], opacity=[], line=dict(width=0)),
-                customdata=[],
-                hovertemplate="<b>%{customdata[0]}</b>=%{customdata[1]}<br>t=%{customdata[2]}<extra></extra>",
-                showlegend=False, name="_ev_strip",
-            ))
+
+            # Only create the strip when at least one subplot uses "_time" as x.
+            # Anchor the strip to the first such subplot's x-axis so event markers
+            # align correctly even when non-_time subplots appear before it.
+            time_idx = next(
+                (i for i, s in enumerate(self.specs)
+                 if isinstance(s.x, str) and s.x == "_time"),
+                None,
+            )
+            if time_idx is not None:
+                x_anchor = "x" if time_idx == 0 else f"x{time_idx + 1}"
+                # yaxis indices 1..n_subplots are used by make_subplots; strip gets n+1
+                n_subplots = len(self.specs)
+                strip_num = n_subplots + 1
+                strip_key = f"yaxis{strip_num}"
+                strip_ref = f"y{strip_num}"
+                fig.update_layout(**{strip_key: dict(
+                    domain=[0.91, 1.0], visible=False, range=[-0.1, 1.1],
+                    anchor=x_anchor,
+                )})
+                self._strip_trace_idx = len(fig.data)
+                fig.add_trace(go.Scatter(
+                    x=[], y=[], mode="markers",
+                    xaxis=x_anchor,
+                    yaxis=strip_ref,
+                    marker=dict(symbol="diamond", size=10,
+                                color=[], opacity=[], line=dict(width=0)),
+                    customdata=[],
+                    hovertemplate="<b>%{customdata[0]}</b>=%{customdata[1]}<br>t=%{customdata[2]}<extra></extra>",
+                    showlegend=False, name="_ev_strip",
+                ))
 
     def _retheme_fig_dict(self, theme_name: str) -> None:
         """Apply a new theme to ``_fig_dict`` in-place (no go.Figure needed)."""

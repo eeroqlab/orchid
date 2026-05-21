@@ -837,6 +837,7 @@ def scenario_18():
 
     # ── Plotter: 3 subplots ───────────────────────────────────────────
     plotter = _make_plotter(
+        PlotSpec(x="lockin_X", y="lockin_Y"),
         PlotSpec(x="_time", y="lockin_X"),
         PlotSpec(x="_time", y="lockin_Y"),
         PlotSpec(x="_time", y="temperature"),
