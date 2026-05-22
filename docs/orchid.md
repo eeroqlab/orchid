@@ -862,8 +862,8 @@ Every combination of procedure type, readout kind, and plot style is covered. Th
 | 6 | 1D sweep | `IMAGE` | live_trace (col) | **array** | readout name | `int` or `str` | — |
 | 7 | 1D sweep | `IMAGE` | live_trace multi-col | **array** | readout name | `[col1, col2]` | — |
 | 8 | 2D sweep | `SCALAR` | heatmap | inner param | outer param | — | readout / — |
-| 9 | 2D sweep | `TRACE` | trace_heatmap | sweep param | **array** | — | readout / — |
-| 10 | 2D sweep | `IMAGE` | trace_heatmap (col) | sweep param | **array** | — | readout / `str` or `int` |
+| 9 | 1D sweep | `TRACE` | trace_heatmap | sweep param | **array** | — | readout / — |
+| 10 | 1D sweep | `IMAGE` | trace_heatmap (col) | sweep param | **array** | — | readout / `str` or `int` |
 | 11 | Monitor | `SCALAR` | line vs time | `"_time"` | readout name | — | — |
 | 12 | Monitor | `TRACE` | line vs time (col) | `"_time"` | readout name | `int` or `str` | — |
 | 13 | Monitor | `TRACE` | multi-line vs time | `"_time"` | readout name | `[col1, col2]` | — |
@@ -929,13 +929,20 @@ plotter = LivePlotter([
     PlotSpec(x="Vgt", y=flist, z="vna", z_col="mag"),
 ])
 
-# heatmap — TRACE readout, pick element 128 (or by name) per cell
+# heatmap — TRACE readout, pick element by name per cell
 bench.add_readout("lockin", kind="trace", shape=(2,),
     contains=["X", "Y"], get_func=lockin.read_xy)
 
+# Default update_every="sweep": one full row written per inner sweep
 plotter = LivePlotter([
-    PlotSpec(x="Vgt", y="fac", z="lockin", z_col="X"),  # in-phase heatmap
-    PlotSpec(x="Vgt", y="fac", z="lockin", z_col="Y"),  # quadrature heatmap
+    PlotSpec(x="Vgt", y="fac", z="lockin", z_col="X"),
+    PlotSpec(x="Vgt", y="fac", z="lockin", z_col="Y"),
+])
+
+# update_every="point" also works: each cell fills as the data arrives
+plotter = LivePlotter([
+    PlotSpec(x="Vgt", y="fac", z="lockin", z_col="X", update_every="point"),
+    PlotSpec(x="Vgt", y="fac", z="lockin", z_col="Y", update_every="point"),
 ])
 ```
 

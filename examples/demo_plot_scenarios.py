@@ -4,7 +4,7 @@ Usage
 -----
     /Users/helium/miniconda3/envs/fem/bin/python examples/demo_plot_scenarios.py <N>
 
-where N is a scenario number 1–18 (or "list" to print the menu).
+where N is a scenario number 1–19 (or "list" to print the menu).
 
 Each demo opens a browser tab at http://localhost:8050, runs a short
 simulated experiment, then freezes the final plot until you press Enter.
@@ -19,8 +19,8 @@ Scenarios
  6  Procedure1D / IMAGE    / live_trace single y_col      — VNA magnitude channel
  7  Procedure1D / IMAGE    / live_trace multi  y_col      — VNA mag + phase
  8  Procedure2D / SCALAR   / heatmap                      — Coulomb diamond
- 9  Procedure2D / TRACE    / trace_heatmap                — spectrum vs gate
-10  Procedure2D / IMAGE    / trace_heatmap + z_col        — VNA image col extraction
+ 9  Procedure1D / TRACE    / trace_heatmap                — spectrum vs gate
+10  Procedure1D / IMAGE    / trace_heatmap + z_col        — VNA image col extraction
 11  Monitor     / SCALAR   / line vs time                 — drifting signal
 12  Monitor     / TRACE    / line vs time single y_col    — lock-in X vs time
 13  Monitor     / TRACE    / line vs time multi  y_col    — lock-in X and Y vs time
@@ -883,8 +883,10 @@ def scenario_18():
 #  Scenario 19 — Procedure2D / TRACE / heatmap + z_col
 #  Lock-in returns [X, Y] at every (Vgt, fac) point (TRACE readout,
 #  shape (2,)).  Two heatmap subplots are built from the *same* readout
-#  by setting z_col='X' and z_col='Y' on separate PlotSpecs — the case
-#  that required the update_heatmap TRACE-buffer fix.
+#  by setting z_col='X' and z_col='Y' on separate PlotSpecs.
+#  Uses update_every="point" so each cell is filled as it arrives —
+#  exercises both the TRACE-buffer (sweep-level) and single-trace
+#  (point-level) code paths in update_heatmap.
 # ══════════════════════════════════════════════════════════════════════
 
 def scenario_19():
@@ -929,12 +931,13 @@ def scenario_19():
     # Two heatmaps from the same TRACE readout — one per lock-in quadrature.
     # z_col selects which element of the (n_inner, 2) sweep buffer to colour.
     spec_X = PlotSpec(x="Vgt", y="fac", z="lockin", z_col="X")
-    spec_Y = PlotSpec(x="Vgt", y="fac", z="lockin", z_col="Y")
+    spec_Y = PlotSpec(x="Vgt", y="fac", z="lockin", z_col="Y", update_every="point")
     plotter = _make_plotter(spec_X, spec_Y)
 
     print("\nScenario 19: 2D TRACE sweep → 2 heatmaps (z_col='X' and z_col='Y')")
     print("  Both heatmaps come from the same lock-in TRACE readout.")
     print("  z_col selects the X (in-phase) or Y (quadrature) component per cell.")
+    print("  update_every='point' — each cell fills as data arrives.")
     _run_sweep(proc, plotter)
 
 
@@ -951,8 +954,8 @@ SCENARIOS = {
     6:  (scenario_06, "Procedure1D / IMAGE    / live_trace single y_col"),
     7:  (scenario_07, "Procedure1D / IMAGE    / live_trace multi y_col (two subplots)"),
     8:  (scenario_08, "Procedure2D / SCALAR   / heatmap (Coulomb diamond)"),
-    9:  (scenario_09, "Procedure2D / TRACE    / trace_heatmap (spectrum vs gate)"),
-    10: (scenario_10, "Procedure2D / IMAGE    / trace_heatmap + z_col"),
+    9:  (scenario_09, "Procedure1D / TRACE    / trace_heatmap (spectrum vs gate)"),
+    10: (scenario_10, "Procedure1D / IMAGE    / trace_heatmap + z_col"),
     11: (scenario_11, "Monitor     / SCALAR   / line vs time"),
     12: (scenario_12, "Monitor     / TRACE    / line vs time single y_col"),
     13: (scenario_13, "Monitor     / TRACE    / multi-line vs time"),

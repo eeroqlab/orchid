@@ -666,41 +666,57 @@ class PlotterBase(abc.ABC):
     def update_heatmap(self, spec_idx: int, spec: PlotSpec, index: tuple, data: dict) -> None:
         """Fill one row or one cell of the heatmap z-matrix.
 
-        When the readout is a TRACE (DataKind.TRACE), the sweep buffer delivers
-        ``z_val`` with shape ``(n_inner, n_trace_pts)``.  ``spec.z_col`` then
-        selects which sample along the trace axis maps to the colour value,
-        reducing the array to ``(n_inner,)`` before writing the heatmap row.
+        Handles three call patterns:
+
+        * ``update_every="sweep"`` (default): index is ``(outer,)``.
+          For SCALAR readouts ``z_val`` is already shape ``(n_inner,)`` — write
+          the whole row directly.  For TRACE readouts ``z_val`` is shape
+          ``(n_inner, n_trace_pts)`` — apply ``z_col`` to reduce to
+          ``(n_inner,)`` first.
+
+        * ``update_every="point"``, SCALAR readout: index is ``(outer, inner)``,
+          ``z_val`` is a plain float — write one cell.
+
+        * ``update_every="point"``, TRACE readout: index is ``(outer, inner)``,
+          ``z_val`` is shape ``(n_trace_pts,)`` — apply ``z_col`` to extract a
+          scalar, then write one cell.
         """
         state = self._sweep_data[spec_idx][0]
         if spec.z not in data or len(index) == 0:
             return
         z_val = data[spec.z]
         row_idx = index[0]
-        if isinstance(z_val, np.ndarray) and z_val.ndim == 2:
-            # TRACE readout: sweep buffer shape is (n_inner, n_trace_pts).
-            # Reduce to (n_inner,) by picking one sample along the trace axis.
-            col: int
+
+        def _resolve_zcol() -> int:
+            """Return the integer column index for spec.z_col."""
             if spec.z_col is None:
-                col = 0
-            elif isinstance(spec.z_col, int):
-                col = spec.z_col
-            else:
-                # String label — resolve via readout.contains if available.
-                readout = (
-                    self._proc.bench.readouts.get(spec.z)
-                    if hasattr(self._proc, "bench") else None
-                )
-                col = (
-                    _resolve_col(spec.z_col, readout, "z_col")
-                    if readout is not None
-                    else 0
-                )
-            state["z"][row_idx, :] = z_val[:, col]
+                return 0
+            if isinstance(spec.z_col, int):
+                return spec.z_col
+            readout = (
+                self._proc.bench.readouts.get(spec.z)
+                if hasattr(self._proc, "bench") else None
+            )
+            return (
+                _resolve_col(spec.z_col, readout, "z_col")
+                if readout is not None else 0
+            )
+
+        if isinstance(z_val, np.ndarray) and z_val.ndim == 2:
+            # Sweep-level TRACE update: shape (n_inner, n_trace_pts).
+            # Reduce to (n_inner,) by picking one sample along the trace axis.
+            state["z"][row_idx, :] = z_val[:, _resolve_zcol()]
         elif isinstance(z_val, np.ndarray) and z_val.ndim == 1:
-            # Normal case: one scalar per inner-sweep point.
-            state["z"][row_idx, :] = z_val
+            if len(index) >= 2:
+                # Point-level TRACE update: z_val is a single trace (n_trace_pts,).
+                # Apply z_col to get a scalar, then write one cell.
+                col_idx = index[-1]
+                state["z"][row_idx, col_idx] = float(z_val[_resolve_zcol()])
+            else:
+                # Sweep-level SCALAR update: z_val is already (n_inner,).
+                state["z"][row_idx, :] = z_val
         else:
-            # Pointwise scalar update (update_every="point").
+            # Point-level SCALAR update (update_every="point").
             col_idx = index[-1] if len(index) >= 2 else 0
             state["z"][row_idx, col_idx] = z_val
         self._fig_dict["data"][self._trace_offsets[spec_idx]]["z"] = state["z"].tolist()
