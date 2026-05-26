@@ -179,6 +179,7 @@ class Bench:
         unit: str | None = None,
         limits: tuple[float, float] | None = None,
         limit_policy: LimitPolicy = LimitPolicy.WARN,
+        initial: float = float("nan"),
     ) -> None:
         """Register a virtual controller that dispatches to physical controllers.
 
@@ -198,10 +199,10 @@ class Bench:
                 binding=lambda v: {"B1": v, "B2": v + 0.05 * v**2},
             )
 
-        Virtual controllers have no readback — ``bench["VP1"]`` raises
-        ``RuntimeError``.  They can appear as sweep controllers in
-        :class:`~orchid.procedure.Sweep` and their limits apply to the
-        *virtual* value before dispatch.
+        Virtual controllers cache the last value written; ``bench["VP1"]``
+        returns that cached setpoint (or ``nan`` if never set).  They can
+        appear as sweep controllers in :class:`~orchid.procedure.Sweep` and
+        their limits apply to the *virtual* value before dispatch.
 
         Parameters
         ----------
@@ -216,6 +217,9 @@ class Bench:
             Inclusive bounds applied to the virtual value before dispatch.
         limit_policy : LimitPolicy
             How to handle virtual-value limit violations.
+        initial : float, optional
+            Seed value for the setpoint cache.  Pass the known hardware state
+            to avoid a ``nan`` warning on the first ``get()``.
         """
         if callable(binding):
             target_names: list[str] = []
@@ -243,6 +247,7 @@ class Bench:
             unit=unit,
             limits=limits,
             limit_policy=limit_policy,
+            initial=initial,
         )
 
     def _check_no_cycle(self, new_name: str, target_names: list[str]) -> None:
@@ -798,6 +803,9 @@ class Bench:
                         "binding": dict(ctrl._binding),
                         **base_meta,
                     }
+                    import math as _math
+                    if not _math.isnan(ctrl._last_value):
+                        entry["last_value"] = ctrl._last_value
                 config["controllers"][cname] = entry
 
             elif ctrl.instrument is not None and ctrl.attr is not None:
@@ -1023,12 +1031,15 @@ class Bench:
                     continue  # retry after other virtuals load
 
                 try:
+                    import math as _math
+                    _last_val = ccfg.get("last_value", float("nan"))
                     bench.add_virtual_controller(
                         cname,
                         binding={k: float(v) for k, v in binding.items()},
                         unit=ccfg.get("unit"),
                         limits=tuple(raw_limits) if raw_limits is not None else None,
                         limit_policy=LimitPolicy(ccfg.get("limit_policy", "warn")),
+                        initial=float(_last_val),
                     )
                 except Exception as exc:
                     bench._stubs[cname] = {

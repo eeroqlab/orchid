@@ -45,6 +45,11 @@ class GateArray:
     Configs are partial by design: ``save_config("pinchoff")`` records the
     current state of all channels, but you can apply a config that only
     specifies a subset and the rest of the array is untouched.
+
+    Virtual controllers (:class:`~orchid.controller.VirtualController`) are
+    fully supported — their ``get()`` returns the last setpoint cached by
+    ``set()``  (or ``nan`` if never written).  No special ``start=``
+    argument is needed.
     """
 
     def __init__(
@@ -91,6 +96,10 @@ class GateArray:
     def get(self, names: list[str] | None = None) -> dict[str, float]:
         """Read current values from the bench.
 
+        For physical controllers this queries the instrument.  For virtual
+        controllers it returns the cached last-set value (``nan`` if not yet
+        written — see :class:`~orchid.controller.VirtualController`).
+
         Parameters
         ----------
         names : list[str] or None
@@ -99,7 +108,7 @@ class GateArray:
         Returns
         -------
         dict[str, float]
-            ``{channel_name: current_value}``
+            ``{channel_name: current_value}``.
         """
         keys = names if names is not None else self._channels
         if names is not None:
@@ -128,6 +137,7 @@ class GateArray:
         steps: int = 100,
         dt: float = 0.01,
         log_events: bool = True,
+        start: dict[str, float] | None = None,
     ) -> None:
         """Interleaved linear ramp to target values.
 
@@ -150,10 +160,17 @@ class GateArray:
         log_events : bool
             Emit a bench event for each ramped channel when the ramp
             completes (default ``True``).
+        start : dict[str, float] or None
+            Explicit starting values.  ``None`` (default) reads current values
+            via ``bench[name]`` — which for virtual controllers returns the
+            cached last-set value.
         """
         self._validate_names(targets)
         self._check_limits(targets)
-        starts = {k: self._bench[k] for k in targets}
+        starts = dict(start) if start is not None else {}
+        for k in targets:
+            if k not in starts:
+                starts[k] = self._bench[k]
         with self._bench.suppress_events():
             for i in range(1, steps + 1):
                 frac = i / steps
@@ -171,6 +188,7 @@ class GateArray:
         steps: int = 100,
         dt: float = 0.01,
         log_events: bool = True,
+        start: dict[str, float] | None = None,
     ) -> None:
         """Async interleaved linear ramp. Drop-in replacement for :meth:`ramp`.
 
@@ -187,10 +205,15 @@ class GateArray:
         log_events : bool
             Emit a bench event for each ramped channel when the ramp
             completes (default ``True``).
+        start : dict[str, float] or None
+            Explicit starting values.  ``None`` reads via ``bench[name]``.
         """
         self._validate_names(targets)
         self._check_limits(targets)
-        starts = {k: self._bench[k] for k in targets}
+        starts = dict(start) if start is not None else {}
+        for k in targets:
+            if k not in starts:
+                starts[k] = self._bench[k]
         with self._bench.suppress_events():
             for i in range(1, steps + 1):
                 frac = i / steps
@@ -247,7 +270,10 @@ class GateArray:
                 )
             config = dict(self._configs[base])
         else:
-            config = self.get()
+            # Snapshot current state — for virtual controllers this returns the
+            # cached last-set value (nan if never written); nan values are excluded.
+            import math as _math
+            config = {k: v for k, v in self.get().items() if not _math.isnan(v)}
 
         if overrides:
             config.update({k: float(v) for k, v in overrides.items()})
@@ -349,7 +375,8 @@ class GateArray:
             Number of points along the trajectory.
         start : dict[str, float] or None
             Starting values.  ``None`` (default) reads current bench values
-            live just before building the sweep.
+            via ``bench[name]`` — which for virtual controllers returns the
+            cached last-set value.
 
         Returns
         -------
@@ -367,7 +394,10 @@ class GateArray:
         from .procedure import MultiSweep
 
         self._validate_names(targets)
-        starts = start if start is not None else {k: self._bench[k] for k in targets}
+        starts = dict(start) if start is not None else {}
+        for k in targets:
+            if k not in starts:
+                starts[k] = self._bench[k]
         controllers = list(targets)
         values = [np.linspace(float(starts[k]), float(targets[k]), n_pts)
                   for k in controllers]

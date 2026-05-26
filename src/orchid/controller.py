@@ -255,7 +255,8 @@ class PhysicalController(ControllerBase):
 class VirtualController(ControllerBase):
     """A controller that dispatches to physical controllers via a binding function.
 
-    No readback path — ``get()`` raises ``RuntimeError``.
+    No hardware readback — ``get()`` returns the last value written (or ``nan``
+    if never written).
 
     Two binding modes:
 
@@ -288,6 +289,10 @@ class VirtualController(ControllerBase):
         ``(lo, hi)`` bounds applied to the *virtual* value before dispatch.
     limit_policy : LimitPolicy, optional
         How to respond to limit violations. Default is ``WARN``.
+    initial : float, optional
+        Seed value for the setpoint cache returned by ``get()``.  Pass the
+        known hardware state at construction to avoid a ``nan`` warning on
+        the first read.  Defaults to ``nan``.
 
     Examples
     --------
@@ -312,10 +317,12 @@ class VirtualController(ControllerBase):
         unit: str | None = None,
         limits: tuple[float, float] | None = None,
         limit_policy: LimitPolicy = LimitPolicy.WARN,
+        initial: float = np.nan,
     ) -> None:
         super().__init__(name, unit=unit, limits=limits, limit_policy=limit_policy)
         self._binding = binding
         self._registry = registry   # live reference — not a copy
+        self._last_value: float = float(initial)
 
     # ── Internal ──────────────────────────────────────────────────────
 
@@ -327,15 +334,36 @@ class VirtualController(ControllerBase):
 
     # ── Public API ────────────────────────────────────────────────────
 
+    def get(self) -> float:
+        """Return the last value written to this controller.
+
+        Raises a warning the first time it is called before any ``set()``.
+        Pass ``initial=`` at construction to pre-seed the cache and suppress
+        the warning.
+        """
+        if np.isnan(self._last_value):
+            warnings.warn(
+                f"VirtualController '{self.name}': get() called before first set(). "
+                "Returning nan. Pass initial= at construction to suppress this warning.",
+                stacklevel=2,
+            )
+        return self._last_value
+
+    async def aget(self) -> float:
+        """Async version of :meth:`get`."""
+        return self.get()
+
     def set(self, value: float) -> None:
-        """Clamp to virtual limits then dispatch to all bound controllers."""
+        """Clamp to virtual limits, cache the value, then dispatch to all bound controllers."""
         value = self._clamp(float(value))
+        self._last_value = value
         for ctrl_name, ctrl_val in self._resolve_targets(value).items():
             self._registry[ctrl_name].set(ctrl_val)
 
     async def aset(self, value: float) -> None:
-        """Clamp to virtual limits then set all bound controllers concurrently."""
+        """Clamp to virtual limits, cache the value, then set all bound controllers concurrently."""
         value = self._clamp(float(value))
+        self._last_value = value
         targets = self._resolve_targets(value)
         await asyncio.gather(*[
             self._registry[name].aset(val)
