@@ -367,8 +367,8 @@ class Bench:
 
         All ``sources`` must be :class:`PhysicalReadout` entries registered
         on this bench — virtual-to-virtual chaining is not supported.  When
-        used in a procedure, every source must also be listed in
-        ``proc.readouts``; the runner validates this at setup time.
+        used in a procedure, sources are measured automatically for the
+        transform even when only the virtual readout is recorded.
 
         Parameters
         ----------

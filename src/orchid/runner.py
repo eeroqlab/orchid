@@ -233,14 +233,22 @@ class WriteStrategy(abc.ABC):
         return result
 
     def _partition_readouts(self) -> tuple[list[str], list[str]]:
-        """Return (physical_names, virtual_names) with physicals ordered first."""
-        phys, virt = [], []
+        """Return physical source names and virtual names needed for this procedure."""
+        phys: list[str] = []
+        virt: list[str] = []
+        seen_phys: set[str] = set()
         for rname in self.proc.readouts:
             rd = self.proc.bench.readouts[rname]
             if isinstance(rd, VirtualReadout):
                 virt.append(rname)
+                for source in rd.sources:
+                    if source not in seen_phys:
+                        phys.append(source)
+                        seen_phys.add(source)
             else:
-                phys.append(rname)
+                if rname not in seen_phys:
+                    phys.append(rname)
+                    seen_phys.add(rname)
         return phys, virt
 
     async def _safe_read(self, readout):
@@ -680,15 +688,21 @@ class ExperimentRunner:
 
     @staticmethod
     def _validate_virtual_readouts(proc) -> None:
-        """Raise ValueError if any VirtualReadout has sources missing from proc.readouts."""
+        """Validate selected virtual readouts can compute from physical sources."""
         for rname in proc.readouts:
             rd = proc.bench.readouts[rname]
             if isinstance(rd, VirtualReadout):
-                missing = [s for s in rd.sources if s not in proc.readouts]
+                missing = [s for s in rd.sources if s not in proc.bench.readouts]
                 if missing:
                     raise ValueError(
-                        f"VirtualReadout {rname!r}: sources {missing} must be listed "
-                        f"in proc.readouts so their data is recorded"
+                        f"VirtualReadout {rname!r}: sources {missing} are not registered "
+                        "on the bench"
+                    )
+                virtual_sources = [s for s in rd.sources if isinstance(proc.bench.readouts[s], VirtualReadout)]
+                if virtual_sources:
+                    raise ValueError(
+                        f"VirtualReadout {rname!r}: sources must be physical readouts, "
+                        f"got virtual sources {virtual_sources}"
                     )
 
     async def arun(self, proc: Procedure, plotter=None,
@@ -986,10 +1000,20 @@ class ExperimentRunner:
                 # Errors are caught per-readout so a single instrument hiccup
                 # doesn't abort a long-running monitor session.
                 data = {}
-                phys_names = [r for r in proc.readouts
-                              if not isinstance(proc.bench.readouts[r], VirtualReadout)]
-                virt_names = [r for r in proc.readouts
-                              if isinstance(proc.bench.readouts[r], VirtualReadout)]
+                phys_names = []
+                virt_names = []
+                seen_phys = set()
+                for rname in proc.readouts:
+                    rd = proc.bench.readouts[rname]
+                    if isinstance(rd, VirtualReadout):
+                        virt_names.append(rname)
+                        for source in rd.sources:
+                            if source not in seen_phys:
+                                phys_names.append(source)
+                                seen_phys.add(source)
+                    elif rname not in seen_phys:
+                        phys_names.append(rname)
+                        seen_phys.add(rname)
 
                 for rname in phys_names:
                     readout = proc.bench.readouts[rname]

@@ -143,13 +143,12 @@ def test_virtual_readout_shape_required_for_non_scalar():
         )
 
 
-def test_bench_getitem_raises_for_virtual_readout():
+def test_bench_getitem_computes_virtual_readout():
     bench = Bench()
     bench.add_readout("raw", kind=DataKind.SCALAR, get_func=lambda: 1.0)
     bench.add_virtual_readout("vrd", sources=["raw"], transform=lambda d: d["raw"])
 
-    with pytest.raises(RuntimeError, match="VirtualReadout"):
-        _ = bench["vrd"]
+    assert bench["vrd"] == pytest.approx(1.0)
 
 
 def test_virtual_readout_acompute_async():

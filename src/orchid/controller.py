@@ -442,9 +442,9 @@ class VirtualReadout:
     from a VNA trace).
 
     The runner always measures physical readouts first, then computes virtuals
-    in the order they appear in ``proc.readouts``.  All ``sources`` must be
-    listed explicitly in ``proc.readouts``; the runner raises ``ValueError``
-    otherwise so the user has full control over what is recorded.
+    in the order they appear in ``proc.readouts``.  If a procedure requests a
+    virtual readout without its sources, the runner still measures those
+    sources for the transform but records only the requested virtual output.
 
     No ``read()`` or ``aread()`` — use ``compute(data)`` / ``acompute(data)``.
 
