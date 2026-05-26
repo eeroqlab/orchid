@@ -6,6 +6,7 @@ from .controller import (
     LimitPolicy, LimitEntry, Readout, PhysicalReadout, VirtualReadout,
 )
 from .bench import Bench
+from .gate_array import GateArray
 from .procedure import ErrorPolicy, MonitorProcedure, MultiSweep, Procedure, Sweep, WriteMode
 from .runner import ExperimentRunner
 from .plotting import EventLineConfig, LivePlotter, DashPlotter, BrowseApp, PlotterBase, PlotSpec, PostResult
@@ -25,6 +26,7 @@ __all__ = [
     "PhysicalReadout",
     "VirtualReadout",
     "Bench",
+    "GateArray",
     "ErrorPolicy",
     "MonitorProcedure",
     "MultiSweep",

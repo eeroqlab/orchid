@@ -27,6 +27,7 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [Time-Series Monitoring](#time-series-monitoring)
   - [Controller Limits](#controller-limits)
   - [Virtual Controllers](#virtual-controllers)
+  - [Gate Arrays](#gate-arrays)
   - [Controller Event Logging](#controller-event-logging)
   - [Post-Experiment Analysis Overlay](#post-experiment-analysis-overlay)
   - [Experiment Browser](#experiment-browser)
@@ -44,6 +45,7 @@ Orchid provides a clean pipeline for running automated lab experiments:
   - [Readout](#readout)
   - [DataKind](#datakind)
   - [Bench](#bench)
+  - [GateArray](#gatearray)
   - [Sweep](#sweep)
   - [MultiSweep](#multisweep)
   - [Procedure](#procedure)
@@ -1527,6 +1529,135 @@ controllers:
 
 ---
 
+### Gate Arrays
+
+A **gate array** bundles a group of bench controllers (e.g. all the gate voltages on a multi-channel DAC) into a single object that supports simultaneous set, linear ramps, named presets, and sweep integration. The underlying controllers remain individually accessible on the bench — the array is a coordination layer on top.
+
+```python
+from orchid import GateArray   # or just use bench.add_gate_array()
+
+gates = bench.add_gate_array("gates", ["P1", "B1", "B2", "ST", "ACC"])
+```
+
+#### Basic get / set
+
+```python
+# Read all channels
+state = gates.get()   # {"P1": -0.4, "B1": -0.2, ...}
+
+# Read a subset
+gates.get(["P1", "B1"])
+
+# Set channels (partial dict — unspecified channels unchanged)
+gates.set({"P1": -0.5, "B1": -0.3})
+```
+
+`set()` fires bench events normally and respects controller limits.
+
+#### Ramp
+
+```python
+# Linear interleaved ramp — all channels step simultaneously
+gates.ramp({"P1": -0.5, "B1": -0.3}, steps=200, dt=0.005)
+```
+
+Bench events are suppressed during the ramp (no flood of intermediate entries in the monitor log). One summary event per channel is emitted when the ramp completes.
+
+```python
+# Async version for Jupyter notebooks
+await gates.aramp({"P1": -0.5}, steps=100, dt=0.01)
+
+# Suppress the summary event too (e.g. in automated scripts)
+gates.ramp({"P1": -0.5}, log_events=False)
+```
+
+If the ramp is interrupted (`Ctrl+C`), channels stay at their last completed step.
+
+#### Named configs
+
+```python
+# Save current state as "pinchoff"
+gates.save_config("pinchoff")
+
+# Save a partial config (only two channels)
+gates.save_config("wide_open", {"P1": 0.0, "B1": 0.0})
+
+# Inherit from an existing config and override one channel
+gates.save_config("near_pinchoff", base="pinchoff", P1=-0.35)
+
+# List / inspect
+gates.list_configs()             # ["pinchoff", "wide_open", "near_pinchoff"]
+gates.load_config("near_pinchoff")  # returns dict without applying
+
+# Apply (jump or ramp)
+gates.apply_config("pinchoff")
+gates.apply_config("pinchoff", ramp=True, steps=150)
+gates.ramp_to_config("near_pinchoff", steps=100, dt=0.01)
+
+# Clean up
+gates.delete_config("wide_open")
+```
+
+Configs are **partial by design** — a config that specifies only `P1` will only touch `P1` when applied; all other channels are left unchanged.
+
+#### Sweep integration
+
+```python
+# Build a MultiSweep from current values to targets (reads bench live)
+ms = gates.to_multisweep({"P1": -0.5, "B1": -0.3}, n_pts=50)
+
+proc = Procedure(
+    name="gate_ramp_scan",
+    bench=bench,
+    sweeps=[ms],
+    readouts=["lockin_X"],
+)
+```
+
+An explicit starting point can be passed with `start=`:
+
+```python
+ms = gates.to_multisweep(
+    targets={"P1": -0.5, "B1": -0.3},
+    n_pts=50,
+    start=gates.load_config("pinchoff"),
+)
+```
+
+#### Summary
+
+```python
+gates.summary()
+# GateArray 'gates'  (5 channels, 2 configs)
+# Channel           Value      Unit  Limits
+# --------  -------------  ------  -------------------
+# P1             -0.4         V     [-1.0, 0.0]
+# B1             -0.2         V     [-2.0, 0.5]
+# ...
+```
+
+#### Persisting configs
+
+Configs are kept in memory and are **not** written to `bench.yaml` (which only stores the channel list). Save and reload them explicitly:
+
+```python
+gates.save("gates_configs.yaml")   # write to file
+gates.load("gates_configs.yaml")   # merge into existing configs
+```
+
+#### Bench registration and save/load
+
+`bench.add_gate_array()` registers the array; `bench.gate_arrays` gives access to all registered arrays. The channel list is saved in `bench.yaml` and restored on `Bench.load()` with empty configs:
+
+```python
+bench.save("bench.yaml")
+bench = Bench.load("bench.yaml")
+gates = bench.gate_arrays["gates"]  # channels restored, configs empty
+gates.load("gates_configs.yaml")    # reload configs separately
+```
+
+---
+
 ### Controller Event Logging
 
 While a background monitor is running, every `bench["param"] = value` call is automatically recorded as a timestamped event. Events are saved to `events.yaml` alongside the data when the monitor finishes.
@@ -2438,6 +2569,62 @@ bench.show_stubs(full_source=True) # full multiline source
 **`stubs`** *(property)* → `dict`
 
 Raw dict of stub entries keyed by name. Each value has at least `"kind"` and `"reason"`. Controller stubs include `"get_func_src"` / `"set_func_src"` when source was recorded at `save()` time.
+
+---
+
+### GateArray
+
+```python
+from orchid import GateArray   # direct import
+# or via bench:
+gates = bench.add_gate_array("gates", ["P1", "B1", "B2"])
+```
+
+Named group of bench controllers with compound operations and config presets. Do not call the constructor directly from user code — use `bench.add_gate_array()` so the array is registered and persisted via `bench.save()`.
+
+#### Constructor (internal — use `bench.add_gate_array()`)
+
+| Argument   | Type        | Default    | Description                                |
+|------------|-------------|------------|--------------------------------------------|
+| `bench`    | `Bench`     | required   | Bench whose controllers this array manages |
+| `channels` | `list[str]` | required   | Ordered list of bench controller names     |
+| `name`     | `str`       | `"gates"`  | Display name                               |
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `get` | `(names=None) -> dict[str, float]` | Read all or a subset of channels from bench |
+| `set` | `(values: dict) -> None` | Set channels immediately; events fire normally; limits checked |
+| `ramp` | `(targets, *, steps=100, dt=0.01, log_events=True) -> None` | Interleaved linear ramp; events suppressed during ramp, one summary event per channel emitted at end |
+| `aramp` | same args, `async def` | Async version; uses `asyncio.sleep` |
+| `save_config` | `(name, values=None, *, base=None, **overrides) -> None` | Save preset — from explicit dict, inherited config, or current state; per-channel keyword overrides applied last |
+| `load_config` | `(name) -> dict[str, float]` | Return a copy of a preset without applying it |
+| `apply_config` | `(name, *, ramp=False, **ramp_kwargs) -> None` | Apply a preset by setting or ramping |
+| `ramp_to_config` | `(name, **ramp_kwargs) -> None` | Shorthand for `apply_config(name, ramp=True)` |
+| `list_configs` | `() -> list[str]` | Config names in insertion order |
+| `delete_config` | `(name) -> None` | Remove a preset |
+| `to_multisweep` | `(targets, n_pts, *, start=None) -> MultiSweep` | Build a `MultiSweep` along a linear trajectory; `start=None` reads bench live |
+| `summary` | `() -> None` | Print channel / value / unit / limits table |
+| `save` | `(path) -> None` | Write configs to a YAML file |
+| `load` | `(path) -> None` | Merge configs from a YAML file |
+
+**Partial configs** — all operation methods accept dicts that cover only a subset of the array's channels. Unspecified channels are silently left unchanged.
+
+**Limit checking** — `set()` and `ramp()` call `_check_limits()` before touching any instrument. A `ValueError` is raised immediately listing all violations; no channels are modified.
+
+**Event suppression** — `ramp()` / `aramp()` call `bench.suppress_events()` internally so intermediate steps don't appear in the monitor event log. One final event per channel is fired after the ramp completes (suppressed when `log_events=False`).
+
+#### `Bench` integration
+
+| Method / Property | Description |
+|-------------------|-------------|
+| `bench.add_gate_array(name, channels)` | Create, register, and return a `GateArray` |
+| `bench.gate_arrays` | `dict[str, GateArray]` of all registered arrays |
+| `bench.suppress_events()` | Context manager to silence event logging for any bulk operation |
+| `bench._fire_event(param, value)` | Fire one event entry unconditionally (for post-ramp summary) |
+
+The channel list is written to `bench.yaml` under a `gate_arrays:` key on `bench.save()` and restored on `Bench.load()` with empty configs. Configs are saved separately with `gate_array.save(path)`.
 
 ---
 

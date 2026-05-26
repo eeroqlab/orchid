@@ -67,6 +67,12 @@ class Bench:
     _event_log: list | None = field(default=None, init=False, repr=False)
     _event_callback: Callable | None = field(default=None, init=False, repr=False)
 
+    # Event suppression flag — set by suppress_events() during bulk operations
+    _suppress_events: bool = field(default=False, init=False, repr=False)
+
+    # Gate arrays registered via add_gate_array()
+    _gate_arrays: dict = field(default_factory=dict, init=False, repr=False)
+
     def __post_init__(self):
         self.data_root = Path(self.data_root)
 
@@ -506,7 +512,7 @@ class Bench:
         """
         if name in self.controllers:
             self.controllers[name].set(value)
-            if self._event_log is not None:
+            if self._event_log is not None and not self._suppress_events:
                 entry = {
                     "time": _time.time(),
                     "param": name,
@@ -539,6 +545,99 @@ class Bench:
         self._event_log = None
         self._event_callback = None
         return log
+
+    def suppress_events(self):
+        """Context manager: temporarily suppress bench event logging.
+
+        Use this around bulk operations (e.g. ramps) to avoid flooding the
+        monitor event log with intermediate steps.  Re-entrant: nested calls
+        are safe.
+
+        Example
+        -------
+        >>> with bench.suppress_events():
+        ...     for v in np.linspace(0, 1, 100):
+        ...         bench["Vgt"] = v
+        ...         time.sleep(0.01)
+        >>> # one event can be emitted manually afterwards if desired
+        """
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            prev = self._suppress_events
+            self._suppress_events = True
+            try:
+                yield
+            finally:
+                self._suppress_events = prev
+
+        return _ctx()
+
+    def _fire_event(self, param: str, value) -> None:
+        """Fire one event entry unconditionally, bypassing the suppress flag.
+
+        Does not call ``controller.set`` — only appends to the event log and
+        triggers the callback.  No-op when no monitor is running.
+
+        Used by :class:`~orchid.gate_array.GateArray` to emit a single
+        summary event per channel after a ramp completes.
+        """
+        if self._event_log is None:
+            return
+        entry = {"time": _time.time(), "param": param, "value": value}
+        self._event_log.append(entry)
+        if self._event_callback is not None:
+            try:
+                self._event_callback(entry)
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Event callback error for {param!r}: {e}")
+
+    # ── Gate arrays ───────────────────────────────────────────────────
+
+    @property
+    def gate_arrays(self) -> dict:
+        """Registered :class:`~orchid.gate_array.GateArray` instances."""
+        return self._gate_arrays
+
+    def add_gate_array(self, name: str, channels: list[str]) -> "GateArray":
+        """Register a gate array and return it.
+
+        Parameters
+        ----------
+        name : str
+            Identifier for this array (used as key in ``bench.gate_arrays``).
+        channels : list[str]
+            Ordered list of controller names to include.  All must already be
+            registered on this bench.
+
+        Returns
+        -------
+        GateArray
+            The newly created (and registered) array.
+
+        Raises
+        ------
+        KeyError
+            If any channel name is not a registered controller.
+
+        Example
+        -------
+        >>> gates = bench.add_gate_array("gates", ["P1", "B1", "B2", "ST"])
+        >>> gates.ramp({"P1": -0.4}, steps=100)
+        """
+        from .gate_array import GateArray
+
+        missing = [c for c in channels if c not in self.controllers]
+        if missing:
+            raise KeyError(
+                f"Controller(s) not found in bench: {missing}. "
+                "Register them with add_controller() first."
+            )
+        ga = GateArray(self, channels, name=name)
+        self._gate_arrays[name] = ga
+        return ga
 
     def snapshot(
         self,
@@ -773,6 +872,13 @@ class Bench:
                     ro_entry["get_func_src"] = src_get
                 config["readouts"][rname] = ro_entry
 
+        # ── gate arrays (channel list only; configs saved separately) ─────
+        if self._gate_arrays:
+            config["gate_arrays"] = {
+                name: {"channels": list(ga._channels)}
+                for name, ga in self._gate_arrays.items()
+            }
+
         path = Path(path)
         with open(path, "w") as f:
             yaml.dump(config, f, default_flow_style=False,
@@ -996,6 +1102,20 @@ class Bench:
                 contains=rcfg.get("contains"),
             )
 
+        # ── gate arrays ───────────────────────────────────────────────
+        for ga_name, ga_cfg in config.get("gate_arrays", {}).items():
+            channels = ga_cfg.get("channels", [])
+            valid = [c for c in channels if c in bench.controllers]
+            if valid:
+                bench.add_gate_array(ga_name, valid)
+            if len(valid) < len(channels):
+                missing = [c for c in channels if c not in bench.controllers]
+                bench._stubs[ga_name] = {
+                    "kind": "gate_array",
+                    "reason": f"missing controller(s): {missing}",
+                    "channels": channels,
+                }
+
         n_stubs = len(bench._stubs)
         stub_hint = f"  ·  {n_stubs} stub{'s' if n_stubs != 1 else ''} — call bench.show_stubs()" if n_stubs else ""
         print(f"Bench loaded ← {path}{stub_hint}")
@@ -1067,6 +1187,11 @@ class Bench:
                 meta = "  ".join(meta_parts)
                 get_s = _fmt_src(stub.get("get_func_src"))
                 rows.append([name, kind, reason, meta, f"get: {get_s}"])
+
+            elif kind == "gate_array":
+                channels = stub.get("channels", [])
+                meta = f"{len(channels)} ch: {channels}"
+                rows.append([name, kind, reason, meta, "—"])
 
         print(_tabulate(rows,
                         headers=["Name", "Kind", "Reason", "Info", "Source (hint)"],
