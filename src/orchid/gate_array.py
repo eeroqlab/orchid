@@ -8,9 +8,9 @@ Example
 -------
 >>> gates = bench.add_gate_array("gates", ["P1", "B1", "B2", "ST"])
 >>> gates.ramp({"P1": -0.4, "B1": -0.2}, steps=200, dt=0.005)
->>> gates.save_config("pinchoff")
->>> gates.save_config("near_pinchoff", base="pinchoff", P1=-0.35)
->>> gates.ramp_to_config("near_pinchoff")
+>>> gates.add_preset("pinchoff")
+>>> gates.add_preset("near_pinchoff", base="pinchoff", P1=-0.35)
+>>> gates.ramp_to_preset("near_pinchoff")
 >>> proc = Procedure(sweeps=[gates.to_multisweep({"P1": -0.5}, n_pts=50)])
 """
 from __future__ import annotations
@@ -42,8 +42,8 @@ class GateArray:
     All operation methods accept **partial dicts** — only the specified
     channels are touched; unspecified ones are left unchanged.
 
-    Configs are partial by design: ``save_config("pinchoff")`` records the
-    current state of all channels, but you can apply a config that only
+    Presets are partial by design: ``add_preset("pinchoff")`` records the
+    current state of all channels, but you can apply a preset that only
     specifies a subset and the rest of the array is untouched.
 
     Virtual controllers (:class:`~orchid.controller.VirtualController`) are
@@ -62,7 +62,7 @@ class GateArray:
         self._bench = bench
         self._channels: list[str] = list(channels)
         self.name = name
-        self._configs: dict[str, dict[str, float]] = {}
+        self._presets: dict[str, dict[str, float]] = {}
 
     # ── Validation helpers ────────────────────────────────────────────────────
 
@@ -226,7 +226,7 @@ class GateArray:
 
     # ── Configs ───────────────────────────────────────────────────────────────
 
-    def save_config(
+    def add_preset(
         self,
         name: str,
         values: dict[str, float] | None = None,
@@ -234,41 +234,41 @@ class GateArray:
         base: str | None = None,
         **overrides: float,
     ) -> None:
-        """Save a named configuration preset.
+        """Store a named preset (does not apply it to the bench).
 
         Priority order:
 
         1. ``values`` — explicit full dict (used as-is, then overrides applied).
-        2. ``base`` — copy an existing config, then apply overrides.
+        2. ``base`` — copy an existing preset, then apply overrides.
         3. Neither — snapshot current bench state, then apply overrides.
 
         Parameters
         ----------
         name : str
-            Config name to save (or overwrite).
+            Preset name to store (or overwrite).
         values : dict[str, float] or None
             Explicit channel values.  ``None`` → read from bench (or ``base``).
         base : str or None
-            Existing config name to inherit from.
+            Existing preset name to inherit from.
         **overrides : float
             Per-channel overrides applied on top of ``values`` or ``base``.
             Use the controller name as the keyword, e.g. ``P1=-0.45``.
 
         Examples
         --------
-        >>> gates.save_config("pinchoff")                       # current state
-        >>> gates.save_config("near_pinchoff", base="pinchoff", P1=-0.35)
-        >>> gates.save_config("manual", {"P1": -0.5, "B1": -0.2})
+        >>> gates.add_preset("pinchoff")                        # current state
+        >>> gates.add_preset("near_pinchoff", base="pinchoff", P1=-0.35)
+        >>> gates.add_preset("manual", {"P1": -0.5, "B1": -0.2})
         """
         if values is not None:
             config = dict(values)
         elif base is not None:
-            if base not in self._configs:
+            if base not in self._presets:
                 raise KeyError(
-                    f"Base config '{base}' not found in gate array '{self.name}'. "
-                    f"Available: {list(self._configs)}"
+                    f"Base preset '{base}' not found in gate array '{self.name}'. "
+                    f"Available: {list(self._presets)}"
                 )
-            config = dict(self._configs[base])
+            config = dict(self._presets[base])
         else:
             # Snapshot current state — for virtual controllers this returns the
             # cached last-set value (nan if never written); nan values are excluded.
@@ -280,81 +280,141 @@ class GateArray:
 
         if config:
             self._validate_names(config)
-        self._configs[name] = config
+        self._presets[name] = config
 
-    def load_config(self, name: str) -> dict[str, float]:
-        """Return a copy of a named config without applying it.
+    def get_preset(self, name: str) -> dict[str, float]:
+        """Return a copy of a named preset without applying it.
 
         Parameters
         ----------
         name : str
-            Config name to retrieve.
+            Preset name to retrieve.
 
         Returns
         -------
         dict[str, float]
             A copy of the stored ``{channel: value}`` dict.
         """
-        if name not in self._configs:
+        if name not in self._presets:
             raise KeyError(
-                f"Config '{name}' not found in gate array '{self.name}'. "
-                f"Available: {list(self._configs)}"
+                f"Preset '{name}' not found in gate array '{self.name}'. "
+                f"Available: {list(self._presets)}"
             )
-        return dict(self._configs[name])
+        return dict(self._presets[name])
 
-    def apply_config(
+    def apply_preset(
         self,
         name: str,
         *,
         ramp: bool = False,
         **ramp_kwargs,
     ) -> None:
-        """Apply a named config by setting or ramping to it.
+        """Apply a named preset by setting or ramping to it.
 
         Parameters
         ----------
         name : str
-            Config name to apply.
+            Preset name to apply.
         ramp : bool
-            If ``True``, ramp to the config values instead of jumping.
+            If ``True``, ramp to the preset values instead of jumping.
         **ramp_kwargs
             Passed to :meth:`ramp` (``steps``, ``dt``, ``log_events``).
         """
-        values = self.load_config(name)
+        values = self.get_preset(name)
         if ramp:
             self.ramp(values, **ramp_kwargs)
         else:
             self.set(values)
 
-    def ramp_to_config(self, name: str, **ramp_kwargs) -> None:
-        """Ramp to a named config. Shorthand for ``apply_config(name, ramp=True)``.
+    def ramp_to_preset(self, name: str, **ramp_kwargs) -> None:
+        """Ramp to a named preset. Shorthand for ``apply_preset(name, ramp=True)``.
 
         Parameters
         ----------
         name : str
-            Config name to ramp to.
+            Preset name to ramp to.
         **ramp_kwargs
             Passed to :meth:`ramp` (``steps``, ``dt``, ``log_events``).
         """
-        self.apply_config(name, ramp=True, **ramp_kwargs)
+        self.apply_preset(name, ramp=True, **ramp_kwargs)
 
-    def list_configs(self) -> list[str]:
-        """Return a list of saved config names in insertion order."""
-        return list(self._configs)
+    def list_presets(self) -> list[str]:
+        """Return a list of preset names in insertion order."""
+        return list(self._presets)
 
-    def delete_config(self, name: str) -> None:
-        """Delete a named config.
+    def show_presets(self) -> None:
+        """Print a comparison table of all stored presets.
+
+        Channels are rows; each preset is a column.  Channels not specified
+        in a given preset (partial presets) show ``—``.  The current bench
+        value is shown in the first column for reference.
+
+        Example output::
+
+            GateArray 'gates'  (4 channels, 3 presets)
+            Channel      Current    pinchoff    wide_open    near_pinchoff
+            ---------  ---------  ----------  -----------  ---------------
+            P1            -0.38       -0.4            0          -0.35
+            B1            -0.15       -0.2            0          -0.2
+            B2            -0.12       -0.15           0          —
+            ST            -0.1        —               —          —
+        """
+        try:
+            from tabulate import tabulate as _tabulate
+            use_tabulate = True
+        except ImportError:
+            use_tabulate = False
+
+        if not self._presets:
+            print(f"GateArray '{self.name}': no presets stored.")
+            return
+
+        preset_names = list(self._presets)
+        headers = ["Channel", "Current"] + preset_names
+
+        rows = []
+        for ch in self._channels:
+            ctrl = self._bench.controllers[ch]
+            try:
+                cur = self._bench[ch]
+                cur_str = f"{cur:.6g}" if cur == cur else "nan"  # nan check
+            except Exception:
+                cur_str = "—"
+            row = [ch, cur_str]
+            for pname in preset_names:
+                preset = self._presets[pname]
+                if ch in preset:
+                    row.append(f"{preset[ch]:.6g}")
+                else:
+                    row.append("—")
+            rows.append(row)
+
+        print(f"GateArray '{self.name}'  "
+              f"({len(self._channels)} channels, {len(self._presets)} presets)")
+        if use_tabulate:
+            print(_tabulate(rows, headers=headers, tablefmt="simple"))
+        else:
+            col_w = [max(len(h), max((len(r[i]) for r in rows), default=0))
+                     for i, h in enumerate(headers)]
+            fmt = "  ".join(f"{{:<{w}}}" for w in col_w)
+            print(fmt.format(*headers))
+            print("  ".join("-" * w for w in col_w))
+            for row in rows:
+                print(fmt.format(*row))
+
+    def delete_preset(self, name: str) -> None:
+        """Delete a named preset.
 
         Parameters
         ----------
         name : str
-            Config name to remove.
+            Preset name to remove.
         """
-        if name not in self._configs:
+        if name not in self._presets:
             raise KeyError(
-                f"Config '{name}' not found in gate array '{self.name}'."
+                f"Preset '{name}' not found in gate array '{self.name}'."
             )
-        del self._configs[name]
+        del self._presets[name]
 
     # ── Sweep integration ─────────────────────────────────────────────────────
 
@@ -429,7 +489,7 @@ class GateArray:
             rows.append([ch, val_str, unit, limits])
 
         print(f"GateArray '{self.name}'  ({len(self._channels)} channels,"
-              f" {len(self._configs)} configs)")
+              f" {len(self._presets)} presets)")
         if use_tabulate:
             print(_tabulate(rows, headers=["Channel", "Value", "Unit", "Limits"],
                             tablefmt="simple"))
@@ -456,12 +516,12 @@ class GateArray:
         data = {
             "name": self.name,
             "channels": list(self._channels),
-            "configs": {n: dict(cfg) for n, cfg in self._configs.items()},
+            "presets": {n: dict(cfg) for n, cfg in self._presets.items()},
         }
         path = Path(path)
         with open(path, "w") as f:
             yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-        print(f"GateArray '{self.name}': {len(self._configs)} config(s) saved → {path}")
+        print(f"GateArray '{self.name}': {len(self._presets)} preset(s) saved → {path}")
 
     def load(self, path: str | Path) -> None:
         """Load configs from a YAML file (merges into existing configs).
@@ -478,10 +538,10 @@ class GateArray:
         path = Path(path)
         with open(path) as f:
             data = yaml.safe_load(f)
-        loaded = data.get("configs", {})
-        self._configs.update(loaded)
+        loaded = data.get("presets", {})
+        self._presets.update(loaded)
         print(
-            f"GateArray '{self.name}': {len(loaded)} config(s) loaded from {path}"
+            f"GateArray '{self.name}': {len(loaded)} preset(s) loaded from {path}"
         )
 
     # ── Dunder ────────────────────────────────────────────────────────────────
@@ -490,7 +550,7 @@ class GateArray:
         return (
             f"GateArray('{self.name}', "
             f"channels={self._channels}, "
-            f"configs={list(self._configs)})"
+            f"presets={list(self._presets)})"
         )
 
     def __len__(self) -> int:

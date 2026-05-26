@@ -1573,32 +1573,32 @@ gates.ramp({"P1": -0.5}, log_events=False)
 
 If the ramp is interrupted (`Ctrl+C`), channels stay at their last completed step.
 
-#### Named configs
+#### Named presets
 
 ```python
-# Save current state as "pinchoff"
-gates.save_config("pinchoff")
+# Store current state as "pinchoff"
+gates.add_preset("pinchoff")
 
-# Save a partial config (only two channels)
-gates.save_config("wide_open", {"P1": 0.0, "B1": 0.0})
+# Store a partial preset (only two channels)
+gates.add_preset("wide_open", {"P1": 0.0, "B1": 0.0})
 
-# Inherit from an existing config and override one channel
-gates.save_config("near_pinchoff", base="pinchoff", P1=-0.35)
+# Inherit from an existing preset and override one channel
+gates.add_preset("near_pinchoff", base="pinchoff", P1=-0.35)
 
 # List / inspect
-gates.list_configs()             # ["pinchoff", "wide_open", "near_pinchoff"]
-gates.load_config("near_pinchoff")  # returns dict without applying
+gates.list_presets()             # ["pinchoff", "wide_open", "near_pinchoff"]
+gates.get_preset("near_pinchoff")   # returns dict without applying
 
 # Apply (jump or ramp)
-gates.apply_config("pinchoff")
-gates.apply_config("pinchoff", ramp=True, steps=150)
-gates.ramp_to_config("near_pinchoff", steps=100, dt=0.01)
+gates.apply_preset("pinchoff")
+gates.apply_preset("pinchoff", ramp=True, steps=150)
+gates.ramp_to_preset("near_pinchoff", steps=100, dt=0.01)
 
 # Clean up
-gates.delete_config("wide_open")
+gates.delete_preset("wide_open")
 ```
 
-Configs are **partial by design** — a config that specifies only `P1` will only touch `P1` when applied; all other channels are left unchanged.
+Presets are **partial by design** — a preset that specifies only `P1` will only touch `P1` when applied; all other channels are left unchanged.
 
 #### Sweep integration
 
@@ -1620,7 +1620,7 @@ An explicit starting point can be passed with `start=`:
 ms = gates.to_multisweep(
     targets={"P1": -0.5, "B1": -0.3},
     n_pts=50,
-    start=gates.load_config("pinchoff"),
+    start=gates.get_preset("pinchoff"),
 )
 ```
 
@@ -1628,7 +1628,7 @@ ms = gates.to_multisweep(
 
 ```python
 gates.summary()
-# GateArray 'gates'  (5 channels, 2 configs)
+# GateArray 'gates'  (5 channels, 2 presets)
 # Channel           Value      Unit  Limits
 # --------  -------------  ------  -------------------
 # P1             -0.4         V     [-1.0, 0.0]
@@ -1636,24 +1636,24 @@ gates.summary()
 # ...
 ```
 
-#### Persisting configs
+#### Persisting presets
 
-Configs are kept in memory and are **not** written to `bench.yaml` (which only stores the channel list). Save and reload them explicitly:
+Presets are kept in memory and are **not** written to `bench.yaml` (which only stores the channel list). Save and reload them explicitly:
 
 ```python
-gates.save("gates_configs.yaml")   # write to file
-gates.load("gates_configs.yaml")   # merge into existing configs
+gates.save("gates_presets.yaml")   # write to file
+gates.load("gates_presets.yaml")   # merge into existing presets
 ```
 
 #### Bench registration and save/load
 
-`bench.add_gate_array()` registers the array; `bench.gate_arrays` gives access to all registered arrays. The channel list is saved in `bench.yaml` and restored on `Bench.load()` with empty configs:
+`bench.add_gate_array()` registers the array; `bench.gate_arrays` gives access to all registered arrays. The channel list is saved in `bench.yaml` and restored on `Bench.load()` with empty presets:
 
 ```python
 bench.save("bench.yaml")
 bench = Bench.load("bench.yaml")
-gates = bench.gate_arrays["gates"]  # channels restored, configs empty
-gates.load("gates_configs.yaml")    # reload configs separately
+gates = bench.gate_arrays["gates"]  # channels restored, presets empty
+gates.load("gates_presets.yaml")    # reload presets separately
 ```
 
 ---
@@ -2598,12 +2598,13 @@ Named group of bench controllers with compound operations and config presets. Do
 | `set` | `(values: dict) -> None` | Set channels immediately; events fire normally; limits checked |
 | `ramp` | `(targets, *, steps=100, dt=0.01, log_events=True) -> None` | Interleaved linear ramp; events suppressed during ramp, one summary event per channel emitted at end |
 | `aramp` | same args, `async def` | Async version; uses `asyncio.sleep` |
-| `save_config` | `(name, values=None, *, base=None, **overrides) -> None` | Save preset — from explicit dict, inherited config, or current state; per-channel keyword overrides applied last |
-| `load_config` | `(name) -> dict[str, float]` | Return a copy of a preset without applying it |
-| `apply_config` | `(name, *, ramp=False, **ramp_kwargs) -> None` | Apply a preset by setting or ramping |
-| `ramp_to_config` | `(name, **ramp_kwargs) -> None` | Shorthand for `apply_config(name, ramp=True)` |
-| `list_configs` | `() -> list[str]` | Config names in insertion order |
-| `delete_config` | `(name) -> None` | Remove a preset |
+| `add_preset` | `(name, values=None, *, base=None, **overrides) -> None` | Store a preset — from explicit dict, inherited preset, or current state; per-channel keyword overrides applied last |
+| `get_preset` | `(name) -> dict[str, float]` | Return a copy of a preset without applying it |
+| `apply_preset` | `(name, *, ramp=False, **ramp_kwargs) -> None` | Apply a preset by setting or ramping |
+| `ramp_to_preset` | `(name, **ramp_kwargs) -> None` | Shorthand for `apply_preset(name, ramp=True)` |
+| `list_presets` | `() -> list[str]` | Preset names in insertion order |
+| `show_presets` | `() -> None` | Print a comparison table: channels × presets, with current bench values in the first column |
+| `delete_preset` | `(name) -> None` | Remove a preset |
 | `to_multisweep` | `(targets, n_pts, *, start=None) -> MultiSweep` | Build a `MultiSweep` along a linear trajectory; `start=None` reads bench live |
 | `summary` | `() -> None` | Print channel / value / unit / limits table |
 | `save` | `(path) -> None` | Write configs to a YAML file |
