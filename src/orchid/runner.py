@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import inspect
 import threading
 import time
 from pathlib import Path
@@ -123,10 +124,33 @@ def _build_schema(proc: Procedure) -> MeasurementSchema:
     )
 
 
+def _hook_positional_capacity(hook) -> tuple[int, bool]:
+    """Return (n_positional, has_var_positional) for a callable."""
+    try:
+        params = inspect.signature(hook).parameters.values()
+    except (ValueError, TypeError):
+        return 0, True  # can't introspect — pass everything
+    has_var = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+    n_pos = sum(
+        1 for p in params
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                      inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    )
+    return n_pos, has_var
+
+
 async def _acall_hook(hook, *args):
-    """Call a hook if it's not None. Supports both sync and async callables."""
+    """Call a hook if it is not None.  Supports sync and async callables.
+
+    The hook is called with as many positional arguments as it declares.
+    This lets users write zero-argument hooks (e.g. ``def reset(): ...``)
+    even when the runner passes contextual arguments such as *axis* or
+    *index*.  Hooks that want the context should declare the corresponding
+    parameter (e.g. ``def on_sweep(axis): ...``).
+    """
     if hook is not None:
-        result = hook(*args)
+        n_pos, has_var = _hook_positional_capacity(hook)
+        result = hook(*args) if has_var else hook(*args[:n_pos])
         if asyncio.iscoroutine(result):
             await result
 
