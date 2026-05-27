@@ -368,13 +368,14 @@ class Bench:
         shape: tuple[int, ...] | None = None,
         unit: str | None = None,
         contains: str | list[str] | None = None,
+        setup: Callable[[], None] | None = None,
     ) -> VirtualReadout:
         """Register a derived readout computed from physical readout data.
 
-        The runner measures all physical readouts first, then calls each
-        virtual readout's ``transform`` with the measured data as a dict.
-        This keeps derived quantities (fits, unit conversions, etc.) in the
-        same dataset as the raw data that produced them.
+        The runner measures all physical readouts first, then — for each
+        virtual readout — optionally calls ``setup()``, re-reads sources if
+        needed, then calls ``transform``.  This keeps derived quantities
+        (fits, unit conversions, etc.) in the same dataset as the raw data.
 
         All ``sources`` must be :class:`PhysicalReadout` entries registered
         on this bench — virtual-to-virtual chaining is not supported.  When
@@ -398,6 +399,16 @@ class Bench:
             Physical unit of the computed result.
         contains : str or list of str, optional
             Description of the computed quantity.
+        setup : callable or None, optional
+            Zero-argument callable (sync or async) invoked by the runner
+            **before** the sources are re-read for this virtual readout.
+            Use it to reconfigure instruments prior to acquisition::
+
+                def narrow_span():
+                    bench["vna_start"] = bench["vna_center"] - 5e6
+                    bench["vna_stop"]  = bench["vna_center"] + 5e6
+
+                bench.add_virtual_readout("res_fit", ..., setup=narrow_span)
 
         Returns
         -------
@@ -441,6 +452,7 @@ class Bench:
             shape=shape,
             unit=unit,
             contains=contains,
+            setup=setup,
         )
         self.readouts[name] = vrd
         return vrd
@@ -503,6 +515,8 @@ class Bench:
         if name in self.readouts:
             rd = self.readouts[name]
             if isinstance(rd, VirtualReadout):
+                if rd.setup is not None:
+                    rd.setup()
                 data = {src: self.readouts[src].read() for src in rd.sources}
                 return rd.compute(data)
             return rd.read()

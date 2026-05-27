@@ -494,6 +494,19 @@ class VirtualReadout:
         Physical unit of the computed result.
     contains : str or list of str, optional
         Description of computed quantity.
+    setup : callable or None, optional
+        Zero-argument callable (sync or async) invoked by the runner
+        **before** the sources are read.  Use it to reconfigure instruments
+        (change frequency span, time constant, averaging, etc.) so the
+        source data is acquired with the desired settings.  The function
+        can read bench controllers to make decisions conditionally::
+
+            def narrow_span():
+                center = bench["vna_center"]   # from previous broad scan
+                bench["vna_start"] = center - 5e6
+                bench["vna_stop"]  = center + 5e6
+
+            bench.add_virtual_readout("res_fit", ..., setup=narrow_span)
 
     Examples
     --------
@@ -521,6 +534,7 @@ class VirtualReadout:
     shape: tuple[int, ...] | None = None
     unit: str | None = None
     contains: str | list[str] | None = None
+    setup: Callable[[], None] | None = field(default=None, repr=False)
 
     def __post_init__(self):
         if self.kind != DataKind.SCALAR and self.shape is None:
@@ -541,7 +555,8 @@ class VirtualReadout:
         return await asyncio.to_thread(self.compute, data)
 
     def __repr__(self) -> str:
-        return f"VirtualReadout({self.name!r}, {self.kind}, sources={self.sources})"
+        setup_str = f", setup={self.setup.__name__!r}" if self.setup is not None else ""
+        return f"VirtualReadout({self.name!r}, {self.kind}, sources={self.sources}{setup_str})"
 
 
 # Backward-compatible alias

@@ -288,9 +288,22 @@ class WriteStrategy(abc.ABC):
         return self._nan_value(readout)
 
     async def _compute_virtual(self, vrd: VirtualReadout, data: dict):
-        """Compute a virtual readout; follows error_policy but no retries."""
+        """Compute a virtual readout; follows error_policy but no retries.
+
+        If ``vrd.setup`` is set, it is called first and the sources are
+        re-read fresh so that the transform receives data acquired with the
+        new instrument settings.
+        """
         proc = self.proc
         try:
+            if vrd.setup is not None:
+                await _acall_hook(vrd.setup)
+                source_data = {}
+                for src in vrd.sources:
+                    source_data[src] = await self._safe_read(
+                        proc.bench.readouts[src]
+                    )
+                return await vrd.acompute(source_data)
             return await vrd.acompute(data)
         except Exception as e:
             if proc.error_policy == ErrorPolicy.STOP_AND_SAVE:
@@ -704,10 +717,15 @@ class ExperimentRunner:
 
     @staticmethod
     def _validate_virtual_readouts(proc) -> None:
-        """Raise ValueError if any VirtualReadout has sources missing from proc.readouts."""
+        """Raise ValueError if any VirtualReadout has sources missing from proc.readouts.
+
+        Virtual readouts with a ``setup`` callable are exempt — the runner
+        re-reads their sources directly after calling ``setup()``, so those
+        sources do not need to appear in ``proc.readouts``.
+        """
         for rname in proc.readouts:
             rd = proc.bench.readouts[rname]
-            if isinstance(rd, VirtualReadout):
+            if isinstance(rd, VirtualReadout) and rd.setup is None:
                 missing = [s for s in rd.sources if s not in proc.readouts]
                 if missing:
                     raise ValueError(
@@ -1026,7 +1044,18 @@ class ExperimentRunner:
                 for rname in virt_names:
                     vrd = proc.bench.readouts[rname]
                     try:
-                        data[rname] = await vrd.acompute(data)
+                        if vrd.setup is not None:
+                            await _acall_hook(vrd.setup)
+                            source_data = {}
+                            for src in vrd.sources:
+                                try:
+                                    source_data[src] = await proc.bench.readouts[src].aread()
+                                except Exception as e:
+                                    print(f"  Warning: re-read error for '{src}' (setup of '{rname}'): {e}")
+                                    source_data[src] = _nan_for_readout(proc.bench.readouts[src])
+                            data[rname] = await vrd.acompute(source_data)
+                        else:
+                            data[rname] = await vrd.acompute(data)
                     except Exception as e:
                         print(f"  Warning: compute error for virtual '{rname}' at sample {sample_idx}: {e}")
                         data[rname] = _nan_for_readout(vrd)
