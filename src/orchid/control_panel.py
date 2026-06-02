@@ -308,14 +308,33 @@ class ControlPanel:
         ctrl_names = self._ctrl_names
 
         # ── Group controllers by instrument ───────────────────────────
-        groups: dict[str, list[str]] = {}  # {instr_name: [ctrl_name, ...]}
+        # ___Instruments first, gate arrays last________________________
+        # Reverse map: controller name -> gate array that owns it (the first one found)
+        ga_of: dict[str, str] = {}
+        for ga_name, ga in bench.gate_arrays.items():
+            for ch in ga.channels:
+                if ch in ga_of:
+                    print(
+                        f"ControlPanel: {ch!r} is in multiple gate arrays"
+                        f"({ga_of[ch]!r},{ga_name!r}); keeping {ga_of[ch]!r}."
+                    )
+                    continue
+                ga_of[ch] = ga_name
+        instr_groups: dict[str, list[str]] = {}
+        ga_groups: dict[str, list[str]] = {}
         for name in ctrl_names:
+            if name in ga_of:
+                ga_groups.setdefault(ga_of[name], []).append(name)
+                continue
             ctrl = bench.controllers[name]
             if hasattr(ctrl, "instrument"):
                 instr_name = ctrl.instrument.name if ctrl.instrument else "Custom"
             else:
                 instr_name = "Custom"
-            groups.setdefault(instr_name, []).append(name)
+            instr_groups.setdefault(instr_name, []).append(name)
+
+        ga_group_names = set(ga_groups)
+        groups = {**instr_groups, **ga_groups}
 
         group_color: dict[str, str] = {
             instr: _GROUP_COLORS[i % len(_GROUP_COLORS)]
@@ -589,12 +608,26 @@ class ControlPanel:
 
         def _strip_group(instr_name: str) -> html.Div:
             color = group_color[instr_name]
+            strips = [_strip(n, color) for n in groups[instr_name]]
+            is_ga = instr_name in ga_group_names
+            children = (
+                [
+                    html.Div(instr_name, className="ga-title"),
+                    html.Div(strips, className="ga-strip-row"),
+                ]
+                if is_ga
+                else strips
+            )
             return html.Div(
                 id={"role": "strip-group", "instr": instr_name},
-                className="strip-group",
-                children=[_strip(n, color) for n in groups[instr_name]],
+                className="strip-group" + (" ga-group" if is_ga else ""),
+                children=children,
             )
 
+        rack_children: list = [_strip_group(g) for g in instr_groups]
+        if ga_groups:
+            rack_children.append(html.Div(id="rack-divider", className="rack-divider"))
+            rack_children += [_strip_group(g) for g in ga_groups]
         # ── Full layout ────────────────────────────────────────────────
         tab_buttons = [
             html.Button(
@@ -678,7 +711,7 @@ class ControlPanel:
                 ),
                 html.Div(
                     className="strip-rack",
-                    children=[_strip_group(instr) for instr in groups],
+                    children=rack_children,
                 ),
                 dcc.Store(id="active-tab", data="ALL"),
                 dcc.Store(
