@@ -312,7 +312,7 @@ class ControlPanel:
         # Reverse map: controller name -> gate array that owns it (the first one found)
         ga_of: dict[str, str] = {}
         for ga_name, ga in bench.gate_arrays.items():
-            for ch in ga.channels:
+            for ch in ga:
                 if ch in ga_of:
                     print(
                         f"ControlPanel: {ch!r} is in multiple gate arrays"
