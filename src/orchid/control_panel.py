@@ -17,8 +17,14 @@ _ASSETS_DIR = pathlib.Path(__file__).parent / "assets"
 
 # One color per instrument group, cycling if more than 8
 _GROUP_COLORS = [
-    "#5bb4ff", "#5bd7a9", "#ffd23a", "#ff5d3b",
-    "#c87cff", "#ff7dbf", "#ff9f43", "#00d2d3",
+    "#5bb4ff",
+    "#5bd7a9",
+    "#ffd23a",
+    "#ff5d3b",
+    "#c87cff",
+    "#ff7dbf",
+    "#ff9f43",
+    "#00d2d3",
 ]
 
 
@@ -38,9 +44,9 @@ def _fmt_step(v: float) -> str:
     if v <= 0:
         return f"{v:g}"
     if v >= 1e6:
-        return f"{v/1e6:g}M"
+        return f"{v / 1e6:g}M"
     if v >= 1e3:
-        return f"{v/1e3:g}k"
+        return f"{v / 1e3:g}k"
     if v >= 1:
         return f"{v:g}"
     if v >= 1e-3:
@@ -109,6 +115,7 @@ def _fmt_sp(v: float, unit: str = "", prec: int = 4) -> str:
 #  Thread-safe last-value-wins queue
 # ══════════════════════════════════════════════════════════════════════
 
+
 class _SetterQueue:
     """Dict-based pending-set store: putting the same key twice keeps only the last value.
 
@@ -164,6 +171,7 @@ class _SetterQueue:
 #  ControlPanel
 # ══════════════════════════════════════════════════════════════════════
 
+
 class ControlPanel:
     """Standalone Dash/DAQ control panel for bench controllers.
 
@@ -201,6 +209,7 @@ class ControlPanel:
     def __init__(
         self,
         bench: Bench,
+        read_only: bool = False,
         port: int = 8051,
         controllers: list[str] | None = None,
         open_browser: bool = False,
@@ -209,6 +218,7 @@ class ControlPanel:
         steps: dict[str, float] | None = None,
     ) -> None:
         self.bench = bench
+        self.read_only = read_only
         self.port = port
         self._ctrl_names: list[str] = controllers or list(bench.controllers.keys())
         self.open_browser = open_browser
@@ -221,7 +231,7 @@ class ControlPanel:
         self._server_thread: threading.Thread | None = None
         self._wsgi_server = None
         self._last_set: tuple[str, float, float] | None = None
-        self._last_error: str | None = None   # set by setter thread on exception
+        self._last_error: str | None = None  # set by setter thread on exception
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -279,8 +289,7 @@ class ControlPanel:
     def _start_dash(self) -> None:
         import logging
 
-        from dash import Dash, dcc, html, no_update
-        from dash import Input, Output, State, ALL, ctx
+        from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update
 
         for lg in ("werkzeug", "dash", "dash.dash", "flask", "flask.app"):
             logging.getLogger(lg).setLevel(logging.ERROR)
@@ -294,13 +303,12 @@ class ControlPanel:
         app.title = "Orchid Control Panel"
         app.logger.setLevel(logging.ERROR)
 
-
         panel = self
         bench = self.bench
         ctrl_names = self._ctrl_names
 
         # ── Group controllers by instrument ───────────────────────────
-        groups: dict[str, list[str]] = {}      # {instr_name: [ctrl_name, ...]}
+        groups: dict[str, list[str]] = {}  # {instr_name: [ctrl_name, ...]}
         for name in ctrl_names:
             ctrl = bench.controllers[name]
             if hasattr(ctrl, "instrument"):
@@ -340,7 +348,9 @@ class ControlPanel:
             if has_limits:
                 lo, hi = ctrl.limits
                 opts = _step_options(lo, hi)
-                default_step = panel._steps.get(name, opts[1] if len(opts) > 1 else opts[0])
+                default_step = panel._steps.get(
+                    name, opts[1] if len(opts) > 1 else opts[0]
+                )
                 slider_val = max(lo, min(hi, val))
                 marks = _nice_marks(lo, hi)
             else:
@@ -349,127 +359,163 @@ class ControlPanel:
 
             children: list = [
                 # ── Header ───────────────────────────────────────────
-                html.Div(className="strip-head", children=[
-                    html.Div(className="strip-label-row", children=[
-                        html.Span(
-                            className="strip-color-dot",
-                            style={"background": color},
+                html.Div(
+                    className="strip-head",
+                    children=[
+                        html.Div(
+                            className="strip-label-row",
+                            children=[
+                                html.Span(
+                                    className="strip-color-dot",
+                                    style={"background": color},
+                                ),
+                                html.Span(name, className="strip-label"),
+                            ],
                         ),
-                        html.Span(name, className="strip-label"),
-                    ]),
-                    html.Span(unit, className="strip-unit"),
-                ]),
-
+                        html.Span(unit, className="strip-unit"),
+                    ],
+                ),
                 # ── LCD: readback (readable) or setpoint mirror (set-only) ──
-                *([ html.Div(className="lcd-frame", children=[
-                    html.Span(
-                        id={"role": lcd_role, "ch": name},
-                        className="lcd-value",
-                        children=f"{val:.4g}",
-                    ),
-                    html.Span(unit, className="lcd-unit"),
-                ])] if show_lcd else []),
-
+                *(
+                    [
+                        html.Div(
+                            className="lcd-frame",
+                            children=[
+                                html.Span(
+                                    id={"role": lcd_role, "ch": name},
+                                    className="lcd-value",
+                                    children=f"{val:.4g}",
+                                ),
+                                html.Span(unit, className="lcd-unit"),
+                            ],
+                        )
+                    ]
+                    if show_lcd
+                    else []
+                ),
                 # ── Setpoint row (readable) / no-readback badge (set-only) ──
-                html.Div(className="sp-row", children=[
-                    *([
-                        html.Span("SP", className="sp-tag"),
-                        html.Span(
-                            id={"role": "sp-text", "ch": name},
-                            className="sp-text",
-                            children=_fmt_sp(val, unit),
+                html.Div(
+                    className="sp-row",
+                    children=[
+                        *(
+                            [
+                                html.Span("SP", className="sp-tag"),
+                                html.Span(
+                                    id={"role": "sp-text", "ch": name},
+                                    className="sp-text",
+                                    children=_fmt_sp(val, unit),
+                                ),
+                            ]
+                            if readable
+                            else [
+                                html.Span("NO RDBACK", className="no-rdback-badge"),
+                                # hidden sink keeps the callback output valid
+                                html.Span(
+                                    id={"role": "sp-text", "ch": name},
+                                    style={"display": "none"},
+                                ),
+                            ]
                         ),
-                    ] if readable else [
-                        html.Span("NO RDBACK", className="no-rdback-badge"),
-                        # hidden sink keeps the callback output valid
-                        html.Span(
-                            id={"role": "sp-text", "ch": name},
-                            style={"display": "none"},
-                        ),
-                    ]),
-                ]),
+                    ],
+                ),
             ]
 
             # ── Vertical slider ───────────────────────────────────────
-            if has_limits:
+            if not panel.read_only:
+                if has_limits:
+                    children.append(
+                        dcc.Slider(
+                            id={"role": "slider", "ch": name},
+                            min=lo,
+                            max=hi,
+                            value=slider_val,
+                            step=default_step,
+                            marks=marks,
+                            vertical=True,
+                            verticalHeight=320,
+                            updatemode="mouseup",
+                            className="vslider",
+                            tooltip={"placement": "right", "always_visible": False},
+                        )
+                    )
+                    children.append(
+                        html.Div(
+                            id={"role": "limit", "ch": name}, className="limit-warn"
+                        )
+                    )
+
+                # ── Numeric input ─────────────────────────────────────────
+                input_kwargs: dict = dict(
+                    id={"role": "input", "ch": name},
+                    type="number",
+                    value=val,
+                    step=default_step,
+                    className="sci-input",
+                    debounce=True,
+                )
+                if has_limits:
+                    input_kwargs["min"] = lo
+                    input_kwargs["max"] = hi
+                children.append(dcc.Input(**input_kwargs))
+
+                # ── Step chips + nudge ────────────────────────────────────
+                if opts:
+                    children.append(
+                        html.Div(
+                            className="step-chips",
+                            children=[
+                                html.Button(
+                                    _fmt_step(s),
+                                    id={"role": "step-chip", "ch": name, "step": s},
+                                    className=(
+                                        "step-chip step-chip-on"
+                                        if abs(s - default_step) < 1e-12
+                                        else "step-chip"
+                                    ),
+                                    n_clicks=0,
+                                )
+                                for s in opts
+                            ],
+                        ),
+                    )
+                    children.append(
+                        html.Div(
+                            className="nudge-row",
+                            children=[
+                                html.Button(
+                                    "−",
+                                    id={"role": "nudge", "ch": name, "dir": -1},
+                                    className="nudge-btn",
+                                    n_clicks=0,
+                                ),
+                                html.Button(
+                                    "+",
+                                    id={"role": "nudge", "ch": name, "dir": 1},
+                                    className="nudge-btn",
+                                    n_clicks=0,
+                                ),
+                            ],
+                        ),
+                    )
+
+                # Stores and hidden sinks
                 children.append(
-                    dcc.Slider(
-                        id={"role": "slider", "ch": name},
-                        min=lo, max=hi,
-                        value=slider_val,
-                        step=default_step,
-                        marks=marks,
-                        vertical=True,
-                        verticalHeight=320,
-                        updatemode="mouseup",
-                        className="vslider",
-                        tooltip={"placement": "right", "always_visible": False},
+                    dcc.Store(id={"role": "step-store", "ch": name}, data=default_step)
+                )
+                children.append(
+                    html.Span(
+                        id={"role": "sink", "ch": name}, style={"display": "none"}
                     )
                 )
-                children.append(
-                    html.Div(id={"role": "limit", "ch": name}, className="limit-warn")
-                )
 
-            # ── Numeric input ─────────────────────────────────────────
-            input_kwargs: dict = dict(
-                id={"role": "input", "ch": name},
-                type="number",
-                value=val,
-                step=default_step,
-                className="sci-input",
-                debounce=True,
-            )
-            if has_limits:
-                input_kwargs["min"] = lo
-                input_kwargs["max"] = hi
-            children.append(dcc.Input(**input_kwargs))
-
-            # ── Step chips + nudge ────────────────────────────────────
-            if opts:
-                children.append(
-                    html.Div(className="step-chips", children=[
-                        html.Button(
-                            _fmt_step(s),
-                            id={"role": "step-chip", "ch": name, "step": s},
-                            className=(
-                                "step-chip step-chip-on"
-                                if abs(s - default_step) < 1e-12
-                                else "step-chip"
-                            ),
-                            n_clicks=0,
-                        )
-                        for s in opts
-                    ]),
-                )
-                children.append(
-                    html.Div(className="nudge-row", children=[
-                        html.Button(
-                            "−",
-                            id={"role": "nudge", "ch": name, "dir": -1},
-                            className="nudge-btn",
-                            n_clicks=0,
-                        ),
-                        html.Button(
-                            "+",
-                            id={"role": "nudge", "ch": name, "dir": 1},
-                            className="nudge-btn",
-                            n_clicks=0,
-                        ),
-                    ]),
-                )
-
-            # Stores and hidden sinks
-            children.append(dcc.Store(id={"role": "step-store", "ch": name}, data=default_step))
-            children.append(html.Span(id={"role": "sink", "ch": name}, style={"display": "none"}))
-
-            return html.Div(className="strip", children=children)
+                return html.Div(className="strip", children=children)
 
         ACCENTS = [
-            ("Blue",    "#4f8ef7"),
-            ("Red",     "#ff3838"),
-            ("Amber",   "#ffb000"),
-            ("Green",   "#39ff14"),
-            ("Cyan",    "#00e7ff"),
+            ("Blue", "#4f8ef7"),
+            ("Red", "#ff3838"),
+            ("Amber", "#ffb000"),
+            ("Green", "#39ff14"),
+            ("Cyan", "#00e7ff"),
             ("Magenta", "#c87cff"),
         ]
 
@@ -485,7 +531,10 @@ class ControlPanel:
                         children=[
                             html.Span(className="appearance-icon"),
                             html.Span("APPEARANCE", className="appearance-label"),
-                            html.Span(id="appearance-accent-dot", className="appearance-accent-dot"),
+                            html.Span(
+                                id="appearance-accent-dot",
+                                className="appearance-accent-dot",
+                            ),
                             html.Span("▾", className="appearance-chev"),
                         ],
                     ),
@@ -494,25 +543,45 @@ class ControlPanel:
                         className="appearance-panel appearance-hidden",
                         children=[
                             html.Div("Theme", className="appearance-section"),
-                            html.Div(className="theme-row", children=[
-                                html.Button("◐  Dark",  id={"role": "theme", "v": "dark"},
-                                            className="theme-btn", n_clicks=0),
-                                html.Button("◑  Light", id={"role": "theme", "v": "light"},
-                                            className="theme-btn", n_clicks=0),
-                            ]),
+                            html.Div(
+                                className="theme-row",
+                                children=[
+                                    html.Button(
+                                        "◐  Dark",
+                                        id={"role": "theme", "v": "dark"},
+                                        className="theme-btn",
+                                        n_clicks=0,
+                                    ),
+                                    html.Button(
+                                        "◑  Light",
+                                        id={"role": "theme", "v": "light"},
+                                        className="theme-btn",
+                                        n_clicks=0,
+                                    ),
+                                ],
+                            ),
                             html.Div("LCD accent", className="appearance-section"),
-                            html.Div(className="accent-row", children=[
-                                html.Button(
-                                    "8.8",
-                                    id={"role": "accent", "v": hexc},
-                                    className="accent-swatch",
-                                    style={"color": hexc, "textShadow": f"0 0 6px {hexc}99"},
-                                    n_clicks=0,
-                                )
-                                for _, hexc in ACCENTS
-                            ]),
-                            html.Div(id="appearance-accent-name", className="appearance-accent-name",
-                                     children=ACCENTS[0][0]),
+                            html.Div(
+                                className="accent-row",
+                                children=[
+                                    html.Button(
+                                        "8.8",
+                                        id={"role": "accent", "v": hexc},
+                                        className="accent-swatch",
+                                        style={
+                                            "color": hexc,
+                                            "textShadow": f"0 0 6px {hexc}99",
+                                        },
+                                        n_clicks=0,
+                                    )
+                                    for _, hexc in ACCENTS
+                                ],
+                            ),
+                            html.Div(
+                                id="appearance-accent-name",
+                                className="appearance-accent-name",
+                                children=ACCENTS[0][0],
+                            ),
                         ],
                     ),
                 ],
@@ -555,42 +624,62 @@ class ControlPanel:
             id="app-root",
             className="app",
             children=[
-                html.Div(className="chassis-head", children=[
-                    html.Div(className="chassis-screw"),
-                    html.Div(className="brand", children=[
-                        html.Div("ORCHID · CONTROL", className="brand-name"),
+                html.Div(
+                    className="chassis-head",
+                    children=[
+                        html.Div(className="chassis-screw"),
                         html.Div(
-                            f"{len(ctrl_names)}-CH · {len(groups)} instrument"
-                            + ("s" if len(groups) != 1 else ""),
-                            className="brand-sub",
+                            className="brand",
+                            children=[
+                                html.Div("ORCHID · CONTROL", className="brand-name"),
+                                html.Div(
+                                    f"{len(ctrl_names)}-CH · {len(groups)} instrument"
+                                    + ("s" if len(groups) != 1 else ""),
+                                    className="brand-sub",
+                                ),
+                            ],
                         ),
-                    ]),
-                    html.Div(className="tabs", children=tab_buttons),
-                    html.Div(className="spacer"),
-                    html.Div(className="indicators", children=[
-                        html.Div(className="indicator", children=[
-                            html.Span(className="led led-green"),
-                            html.Span("PWR", className="led-label"),
-                        ]),
-                        html.Div(className="indicator", children=[
-                            html.Span(id="led-run", className="led led-green pulse"),
-                            html.Span("RUN", className="led-label"),
-                        ]),
-                        html.Div(className="indicator", children=[
-                            html.Span(id="led-fault", className="led led-off"),
-                            html.Span("FAULT", className="led-label"),
-                        ]),
-                    ]),
-                    _appearance_menu(),
-                    html.Div(className="chassis-screw"),
-                ]),
-
+                        html.Div(className="tabs", children=tab_buttons),
+                        html.Div(className="spacer"),
+                        html.Div(
+                            className="indicators",
+                            children=[
+                                html.Div(
+                                    className="indicator",
+                                    children=[
+                                        html.Span(className="led led-green"),
+                                        html.Span("PWR", className="led-label"),
+                                    ],
+                                ),
+                                html.Div(
+                                    className="indicator",
+                                    children=[
+                                        html.Span(
+                                            id="led-run",
+                                            className="led led-green pulse",
+                                        ),
+                                        html.Span("RUN", className="led-label"),
+                                    ],
+                                ),
+                                html.Div(
+                                    className="indicator",
+                                    children=[
+                                        html.Span(
+                                            id="led-fault", className="led led-off"
+                                        ),
+                                        html.Span("FAULT", className="led-label"),
+                                    ],
+                                ),
+                            ],
+                        ),
+                        _appearance_menu(),
+                        html.Div(className="chassis-screw"),
+                    ],
+                ),
                 html.Div(
                     className="strip-rack",
                     children=[_strip_group(instr) for instr in groups],
                 ),
-
-
                 dcc.Store(id="active-tab", data="ALL"),
                 dcc.Store(
                     id="appearance-state",
@@ -620,14 +709,14 @@ class ControlPanel:
 
         # RUN + FAULT LEDs — wired to setter queue depth and last error
         @app.callback(
-            Output("led-run",   "className"),
+            Output("led-run", "className"),
             Output("led-fault", "className"),
             Input("status-interval", "n_intervals"),
         )
         def _update_leds(_n):
             pending = panel._queue.depth
-            run_cls   = "led led-amber pulse" if pending else "led led-green pulse"
-            fault_cls = "led led-red pulse"   if panel._last_error else "led led-off"
+            run_cls = "led led-amber pulse" if pending else "led led-green pulse"
+            fault_cls = "led led-red pulse" if panel._last_error else "led led-off"
             return run_cls, fault_cls
 
         # Active tab → update tab button classes (clientside)
@@ -706,8 +795,8 @@ class ControlPanel:
                 ];
             }}
             """,
-            Output("appearance-panel",       "className"),
-            Output("appearance-accent-dot",  "style"),
+            Output("appearance-panel", "className"),
+            Output("appearance-accent-dot", "style"),
             Output("appearance-accent-name", "children"),
             Input("appearance-state", "data"),
         )
@@ -766,25 +855,35 @@ class ControlPanel:
                 # Slider ↔ input sync + queue set + limit warning
                 # For set-only controllers also update the lcd-sp element
                 _sync_outputs = [
-                    Output({"role": "input",   "ch": name}, "value"),
-                    Output({"role": "slider",  "ch": name}, "value"),
+                    Output({"role": "input", "ch": name}, "value"),
+                    Output({"role": "slider", "ch": name}, "value"),
                     Output({"role": "sp-text", "ch": name}, "children"),
-                    Output({"role": "limit",   "ch": name}, "children"),
-                    Output({"role": "limit",   "ch": name}, "className"),
+                    Output({"role": "limit", "ch": name}, "children"),
+                    Output({"role": "limit", "ch": name}, "className"),
                 ]
                 if show_lcd and not readable:
-                    _sync_outputs.append(Output({"role": "lcd-sp", "ch": name}, "children"))
+                    _sync_outputs.append(
+                        Output({"role": "lcd-sp", "ch": name}, "children")
+                    )
 
                 @app.callback(
                     *_sync_outputs,
-                    Input({"role": "slider",    "ch": name}, "value"),
-                    Input({"role": "input",     "ch": name}, "value"),
+                    Input({"role": "slider", "ch": name}, "value"),
+                    Input({"role": "input", "ch": name}, "value"),
                     prevent_initial_call=True,
                 )
-                def _sync(slider_val, input_val,
-                          _name=name, _lo=lo, _hi=hi,
-                          _soft_lo=soft_lo, _soft_hi=soft_hi, _unit=unit,
-                          _readable=readable, _show_lcd=show_lcd):
+                def _sync(
+                    slider_val,
+                    input_val,
+                    _name=name,
+                    _lo=lo,
+                    _hi=hi,
+                    _soft_lo=soft_lo,
+                    _soft_hi=soft_hi,
+                    _unit=unit,
+                    _readable=readable,
+                    _show_lcd=show_lcd,
+                ):
                     triggered = ctx.triggered_id
                     val = (
                         slider_val
@@ -799,9 +898,9 @@ class ControlPanel:
                     if v < _lo or v > _hi:
                         lim_txt, lim_cls = "⚠ OUT OF LIMIT", "limit-warn limit-over"
                     elif v < _soft_lo or v > _soft_hi:
-                        lim_txt, lim_cls = "⚠ NEAR LIMIT",   "limit-warn limit-near"
+                        lim_txt, lim_cls = "⚠ NEAR LIMIT", "limit-warn limit-near"
                     else:
-                        lim_txt, lim_cls = "",                 "limit-warn"
+                        lim_txt, lim_cls = "", "limit-warn"
                     result = [val, val, sp, lim_txt, lim_cls]
                     if _show_lcd and not _readable:
                         result.append(f"{float(val):.4g}" if val is not None else "---")
@@ -810,17 +909,22 @@ class ControlPanel:
                 # Step chip → update step store + highlight + slider step
                 @app.callback(
                     Output({"role": "step-store", "ch": name}, "data"),
-                    Output({"role": "step-chip",  "ch": name, "step": ALL}, "className"),
-                    Output({"role": "slider",     "ch": name}, "step"),
-                    Output({"role": "input",      "ch": name}, "step"),
-                    Input({"role": "step-chip",   "ch": name, "step": ALL}, "n_clicks"),
-                    State({"role": "step-chip",   "ch": name, "step": ALL}, "id"),
+                    Output({"role": "step-chip", "ch": name, "step": ALL}, "className"),
+                    Output({"role": "slider", "ch": name}, "step"),
+                    Output({"role": "input", "ch": name}, "step"),
+                    Input({"role": "step-chip", "ch": name, "step": ALL}, "n_clicks"),
+                    State({"role": "step-chip", "ch": name, "step": ALL}, "id"),
                     prevent_initial_call=True,
                 )
                 def _on_step_chip(_clicks, chip_ids, _name=name):
                     trig = ctx.triggered_id
                     if trig is None:
-                        return no_update, [no_update] * len(chip_ids), no_update, no_update
+                        return (
+                            no_update,
+                            [no_update] * len(chip_ids),
+                            no_update,
+                            no_update,
+                        )
                     step = float(trig["step"])
                     classes = [
                         "step-chip step-chip-on"
@@ -832,16 +936,19 @@ class ControlPanel:
 
                 # Nudge − / + → bump value by current step
                 @app.callback(
-                    Output({"role": "slider", "ch": name}, "value", allow_duplicate=True),
-                    Output({"role": "input",  "ch": name}, "value", allow_duplicate=True),
-                    Input({"role": "nudge",   "ch": name, "dir": -1}, "n_clicks"),
-                    Input({"role": "nudge",   "ch": name, "dir":  1}, "n_clicks"),
-                    State({"role": "slider",  "ch": name}, "value"),
+                    Output(
+                        {"role": "slider", "ch": name}, "value", allow_duplicate=True
+                    ),
+                    Output(
+                        {"role": "input", "ch": name}, "value", allow_duplicate=True
+                    ),
+                    Input({"role": "nudge", "ch": name, "dir": -1}, "n_clicks"),
+                    Input({"role": "nudge", "ch": name, "dir": 1}, "n_clicks"),
+                    State({"role": "slider", "ch": name}, "value"),
                     State({"role": "step-store", "ch": name}, "data"),
                     prevent_initial_call=True,
                 )
-                def _on_nudge(_m, _p, current_val, step,
-                              _name=name, _lo=lo, _hi=hi):
+                def _on_nudge(_m, _p, current_val, step, _name=name, _lo=lo, _hi=hi):
                     trig = ctx.triggered_id
                     if trig is None or current_val is None:
                         return no_update, no_update
@@ -857,29 +964,45 @@ class ControlPanel:
                 unit = ctrl.unit or ""
 
                 _no_lim_outputs = [
-                    Output({"role": "sink",    "ch": name}, "children"),
+                    Output({"role": "sink", "ch": name}, "children"),
                     Output({"role": "sp-text", "ch": name}, "children"),
                 ]
                 if show_lcd and not readable:
-                    _no_lim_outputs.append(Output({"role": "lcd-sp", "ch": name}, "children"))
+                    _no_lim_outputs.append(
+                        Output({"role": "lcd-sp", "ch": name}, "children")
+                    )
 
                 @app.callback(
                     *_no_lim_outputs,
                     Input({"role": "input", "ch": name}, "value"),
                     prevent_initial_call=True,
                 )
-                def _set_no_limits(input_val, _name=name, _unit=unit,
-                                   _readable=readable, _show_lcd=show_lcd):
+                def _set_no_limits(
+                    input_val,
+                    _name=name,
+                    _unit=unit,
+                    _readable=readable,
+                    _show_lcd=show_lcd,
+                ):
                     if input_val is not None:
                         panel.set(_name, float(input_val))
-                    sp = _fmt_sp(float(input_val), _unit) if input_val is not None else "—"
+                    sp = (
+                        _fmt_sp(float(input_val), _unit)
+                        if input_val is not None
+                        else "—"
+                    )
                     result = [no_update, sp]
                     if _show_lcd and not _readable:
-                        result.append(f"{float(input_val):.4g}" if input_val is not None else "---")
+                        result.append(
+                            f"{float(input_val):.4g}"
+                            if input_val is not None
+                            else "---"
+                        )
                     return result
 
         # Readback — parallel reads via thread pool (readable controllers only)
         if panel.readback and has_readable:
+
             @app.callback(
                 Output({"role": "lcd", "ch": ALL}, "children"),
                 Input("readback-interval", "n_intervals"),
@@ -897,10 +1020,10 @@ class ControlPanel:
                 with concurrent.futures.ThreadPoolExecutor() as pool:
                     return list(pool.map(_read, names))
 
-
         # ── Start WSGI server ──────────────────────────────────────────
         try:
             import flask.cli
+
             flask.cli.show_server_banner = lambda *a, **kw: None
         except (ImportError, AttributeError):
             pass
@@ -916,6 +1039,7 @@ class ControlPanel:
 
         if self.open_browser:
             import webbrowser
+
             webbrowser.open(f"http://localhost:{self.port}")
 
         print(f"Control panel started at http://localhost:{self.port}")
