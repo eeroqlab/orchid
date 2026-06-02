@@ -527,7 +527,7 @@ class ControlPanel:
                     )
                 )
 
-                return html.Div(className="strip", children=children)
+            return html.Div(className="strip", children=children)
 
         ACCENTS = [
             ("Blue", "#4f8ef7"),
