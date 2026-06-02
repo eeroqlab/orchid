@@ -28,4 +28,4 @@ _autosummary/
 *.bak
 
 # exceptions
-!requirements.txt
+!requirements.txt.venv/
