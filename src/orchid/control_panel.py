@@ -432,8 +432,8 @@ class ControlPanel:
                             id={"role": "sp-text", "ch": name},
                             style={"display": "none"},
                         ),
-                    ],
-                ),
+                    ]),
+                ]),
             ]
 
             # ── Vertical slider ───────────────────────────────────────
