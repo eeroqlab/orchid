@@ -19,6 +19,7 @@ dependencies = [
     "qcodes",
     "pymeasure",
     "zarro @ git+https://github.com/eeroqlab/zarro.git",
+    "zarr>=3.2.1",
 ]
 
 [tool.setuptools.packages.find]
