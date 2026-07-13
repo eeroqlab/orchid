@@ -1,12 +1,11 @@
 """Live plotting for experiments — backend-agnostic base with swappable servers."""
 
-from ._spec import EventLineConfig, PlotSpec, PostResult
+from ._spec import PlotSpec, PostResult
 from ._base import PlotterBase
-from ._dash import DashPlotter, LivePlotter, _lp_line_trace_info, _lp_has_rail, _lp_rail_children, _lp_header
+from ._dash import DashPlotter, LivePlotter
 from ._browse import BrowseApp
 
 __all__ = [
-    "EventLineConfig",
     "PlotSpec",
     "PostResult",
     "PlotterBase",

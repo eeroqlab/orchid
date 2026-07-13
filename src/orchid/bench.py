@@ -238,7 +238,7 @@ class Bench:
                 for n in binding
                 if self.controllers[n].unit
             ))
-            unit = units[0] if len(units) == 1 else (units[0] if units else None)
+            unit = units[0] if units else None
 
         self.controllers[name] = VirtualController(
             name=name,

@@ -113,10 +113,10 @@ def _is_readable(ctrl: Controller) -> bool:
     return False
 
 
-def _fmt_sp(v: float, unit: str = "", prec: int = 4) -> str:
+def _fmt_sp(v: float, unit: str = "") -> str:
     """Format a setpoint value: sign prefix + fixed decimals + optional unit."""
     sign = "−" if v < 0 else "+"
-    return f"{sign}{abs(v):.{prec}f}" + (f" {unit}" if unit else "")
+    return f"{sign}{abs(v):.4f}" + (f" {unit}" if unit else "")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -238,7 +238,6 @@ class ControlPanel:
         self._setter_thread: threading.Thread | None = None
         self._server_thread: threading.Thread | None = None
         self._wsgi_server = None
-        self._last_set: tuple[str, float, float] | None = None
         self._last_error: str | None = None  # set by setter thread on exception
 
     # ── Public API ────────────────────────────────────────────────────
@@ -283,7 +282,6 @@ class ControlPanel:
                 for name, val in items.items():
                     try:
                         self.bench[name] = val
-                        self._last_set = (name, val, time.time())
                         self._last_error = None
                     except Exception as exc:
                         self._last_error = f"{name}: {exc}"

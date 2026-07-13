@@ -8,7 +8,6 @@ from pathlib import Path
 
 from ._spec import (
     PlotSpec,
-    EventLineConfig,
     _deep_merge,
     _EV_PALETTE,
     _format_elapsed_display,
@@ -340,43 +339,10 @@ def _lp_rail_children(plotter) -> list:
 
 def _lp_header(proc_name: str, theme_name: str, plotter) -> object:
     """Build the ``<header>`` bar for the DashPlotter page."""
-    from ._themes import THEMES
+    from ._themes import build_theme_picker
     from dash import dcc, html
 
-    # Appearance options: one entry per theme
-    options = []
-    for key, td in THEMES.items():
-        traces = td.get("traces", ["#888"])
-        swatches = [
-            html.Span(style={
-                "backgroundColor": traces[i] if i < len(traces) else "#ccc",
-                "display": "inline-block",
-                "width": "14px", "height": "28px",
-            })
-            for i in range(3)
-        ]
-        label = html.Div([
-            html.Span(swatches, style={
-                "display": "inline-flex",
-                "border": "1px solid rgba(128,128,128,0.2)",
-            }),
-            html.Div([
-                html.Div(td["name"], className="lp-theme-name"),
-                html.Div(td.get("sub", ""), className="lp-theme-sub"),
-            ]),
-        ], className="lp-theme-option")
-        options.append({"label": label, "value": key})
-
-    # Mini swatches for the summary trigger
-    cur_td = THEMES.get(theme_name, THEMES["orchid"])
-    cur_traces = cur_td.get("traces", ["#888"])
-    summary_swatches = [
-        html.Span(style={
-            "backgroundColor": cur_traces[i] if i < len(cur_traces) else "#ccc",
-            "display": "inline-block", "width": "8px", "height": "12px",
-        })
-        for i in range(3)
-    ]
+    options, summary_swatches = build_theme_picker(theme_name)
 
     return html.Div(className="lp-header", children=[
         # Brand mark
@@ -474,8 +440,6 @@ class DashPlotter(PlotterBase):
         If True, automatically open the plot in the default browser.
     update_interval : int
         Dash polling interval in milliseconds. Default 500 ms.
-    event_line : EventLineConfig, optional
-        Visual style for parameter-change markers on monitor plots.
     max_display_pts : int
         Maximum points shown on line plots (rolling window for monitors).
         Default 5000.
@@ -511,7 +475,6 @@ class DashPlotter(PlotterBase):
         width: int = 700,
         open_browser: bool = False,
         update_interval: int = 500,
-        event_line: EventLineConfig | None = None,
         max_display_pts: int = 5000,
         theme: str = "orchid",
         rail_readouts: list[str] | None = None,
@@ -522,7 +485,6 @@ class DashPlotter(PlotterBase):
             height=height,
             width=width,
             open_browser=open_browser,
-            event_line=event_line,
             max_display_pts=max_display_pts,
         )
         self.port = port
@@ -1048,8 +1010,6 @@ class DashPlotter(PlotterBase):
         """
         import dataclasses, gzip, json, yaml
 
-        el = self.event_line
-
         # JSON-round-trip converts any numpy scalars / arrays to Python
         # natives so yaml.safe_dump can serialise them without error.
         def _yaml_safe(obj):
@@ -1072,7 +1032,6 @@ class DashPlotter(PlotterBase):
                 "max_display_pts": self.max_display_pts,
                 "rail_readouts":   list(self.rail_readouts),
                 "instrument_info": dict(self.instrument_info),
-                **({"event_line": dataclasses.asdict(el)} if el is not None else {}),
             },
             "internal": {
                 "resolved_types":           list(self._resolved_types),
@@ -1128,7 +1087,6 @@ class DashPlotter(PlotterBase):
             # browser opens with the saved figure
         """
         import gzip, json, yaml
-        from ._spec import EventLineConfig
 
         data_dir = Path(data_dir)
         config   = yaml.safe_load((data_dir / "plotter_config.yaml").read_text())
@@ -1139,8 +1097,7 @@ class DashPlotter(PlotterBase):
         pa = dict(config["plotter"])
         if port is not None:
             pa["port"] = port
-        if "event_line" in pa and pa["event_line"] is not None:
-            pa["event_line"] = EventLineConfig(**pa["event_line"])
+        pa.pop("event_line", None)  # dropped field — ignore if present in older saves
         specs   = [PlotSpec.from_dict(s) for s in config["specs"]]
         plotter = cls(plots=specs, **pa)
 

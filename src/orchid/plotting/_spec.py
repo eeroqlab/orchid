@@ -10,45 +10,6 @@ from ..controller import DataKind
 
 
 @dataclass
-class EventLineConfig:
-    """Visual properties for parameter-change event markers on time-series plots.
-
-    Parameters
-    ----------
-    color : str
-        Line and label font color. Any CSS/plotly color string.
-    width : int
-        Line width in pixels.
-    dash : str
-        Line style: ``"solid"``, ``"dot"``, ``"dash"``, ``"longdash"``, ``"dashdot"``.
-    font_size : int
-        Label font size in points.
-    bgcolor : str
-        Label box background color. Use ``rgba(r,g,b,a)`` for transparency.
-    bordercolor : str
-        Label box border color.
-    borderwidth : int
-        Label box border width in pixels.
-    borderpad : int
-        Padding in pixels between the label text and the box border.
-
-    Examples
-    --------
-    >>> EventLineConfig(color="#444444", dash="dot", width=2)
-    >>> EventLineConfig(color="#2255cc", bgcolor="rgba(255,255,255,0.0)")  # no box
-    """
-
-    color: str = "#444444"
-    width: int = 2
-    dash: str = "dash"
-    font_size: int = 15
-    bgcolor: str = "rgba(255,255,255,0.85)"
-    bordercolor: str = "#000000"
-    borderwidth: int = 1
-    borderpad: int = 3
-
-
-@dataclass
 class PostResult:
     """Describes one post-experiment analysis result to overlay on the live plot.
 

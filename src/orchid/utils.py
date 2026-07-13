@@ -127,7 +127,6 @@ def apply_theme(
 # 1. Define bold escape sequences
 BOLD = "\033[1m"
 RESET = "\033[0m"
-SPACES = "\x20\x20\x20\x20"
 
 
 def update_metadata(data_dir: str | Path, **kwargs) -> dict:

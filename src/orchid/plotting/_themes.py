@@ -149,6 +149,51 @@ THEMES: dict[str, dict] = {
 }
 
 
+def build_theme_picker(theme_name: str) -> tuple[list[dict], list]:
+    """Build the theme-radio ``options`` and the current-theme summary swatches.
+
+    Shared by the DashPlotter and BrowseApp header bars, which both offer
+    the same theme picker. Returns ``(options, summary_swatches)`` — the
+    former is a ``dcc.RadioItems``-style options list, the latter a list
+    of ``dash.html.Span`` elements for the collapsed-summary preview.
+    """
+    from dash import html
+
+    options = []
+    for key, td in THEMES.items():
+        traces = td.get("traces", ["#888"])
+        swatches = [
+            html.Span(style={
+                "backgroundColor": traces[i] if i < len(traces) else "#ccc",
+                "display": "inline-block",
+                "width": "14px", "height": "28px",
+            })
+            for i in range(3)
+        ]
+        label = html.Div([
+            html.Span(swatches, style={
+                "display": "inline-flex",
+                "border": "1px solid rgba(128,128,128,0.2)",
+            }),
+            html.Div([
+                html.Div(td["name"], className="lp-theme-name"),
+                html.Div(td.get("sub", ""), className="lp-theme-sub"),
+            ]),
+        ], className="lp-theme-option")
+        options.append({"label": label, "value": key})
+
+    cur_td = THEMES.get(theme_name, THEMES["orchid"])
+    cur_traces = cur_td.get("traces", ["#888"])
+    summary_swatches = [
+        html.Span(style={
+            "backgroundColor": cur_traces[i] if i < len(cur_traces) else "#ccc",
+            "display": "inline-block", "width": "8px", "height": "12px",
+        })
+        for i in range(3)
+    ]
+    return options, summary_swatches
+
+
 def plotly_template(theme: dict) -> dict:
     """Return a Plotly layout dict that themes any figure."""
     grid = "rgba(255,255,255,0.06)" if theme["mode"] == "dark" else "rgba(0,0,0,0.06)"

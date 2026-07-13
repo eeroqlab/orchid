@@ -11,15 +11,9 @@ from enum import StrEnum
 from typing import Any, Callable, NamedTuple
 
 import numpy as np
+from zarro import DataKind
 
 from .instrument import InstrumentAdapter
-
-
-class DataKind(StrEnum):
-    """Shape of a single measurement readout (mirrors zarro.DataKind)."""
-    SCALAR = "scalar"
-    TRACE = "trace"
-    IMAGE = "image"
 
 
 class LimitPolicy(StrEnum):

@@ -9,7 +9,6 @@ import numpy as np
 from ..controller import DataKind
 from ._spec import (
     PlotSpec,
-    EventLineConfig,
     _y_list,
     _is_array,
     _find_sweep_by_ctrl,
@@ -44,8 +43,6 @@ class PlotterBase(abc.ABC):
         Figure width in pixels.
     open_browser : bool
         If True, automatically open the plot when the server starts.
-    event_line : EventLineConfig, optional
-        Visual style for parameter-change event markers.
     max_display_pts : int
         Maximum points shown on line plots. For monitors this is the
         rolling-window size; for sweep plots the buffer is sized to the
@@ -58,14 +55,12 @@ class PlotterBase(abc.ABC):
         height: int = 350,
         width: int = 700,
         open_browser: bool = False,
-        event_line: EventLineConfig | None = None,
         max_display_pts: int = 5000,
     ):
         self.specs = plots
         self.height_per_plot = height
         self.width = width
         self.open_browser = open_browser
-        self.event_line = event_line if event_line is not None else EventLineConfig()
         self.max_display_pts = max_display_pts
 
         # Internal state — populated by setup()
@@ -334,69 +329,17 @@ class PlotterBase(abc.ABC):
         self.on_data_changed()
 
     def notify_event(self, timestamp: float, param: str, value) -> None:
-        """Mark a parameter change on all time-series subplots.
+        """Record a parameter-change event.
 
         Called automatically by the runner when ``bench["param"] = value``
-        is executed during a monitor run. Draws a vertical dashed line
-        and a label on every subplot whose x-axis is ``"_time"``.
+        is executed during a monitor run. Subclasses that render event
+        markers (e.g. :class:`DashPlotter`) override this; the base
+        implementation only keeps timestamp bookkeeping in sync so
+        :meth:`format_elapsed` unit-rescaling accounts for events.
         """
         if self._fig_dict is None or self._t0 is None:
             return
-
-        elapsed = timestamp - self._t0
-        x_val, unit = self.format_elapsed(elapsed)
-
-        label = f"{param}={value:.4g}" if isinstance(value, (int, float)) else f"{param}={value}"
-
-        layout = self._fig_dict["layout"]
-        if "shapes" not in layout:
-            layout["shapes"] = []
-        if "annotations" not in layout:
-            layout["annotations"] = []
-
         self._event_timestamps.append(timestamp)
-
-        for i, spec in enumerate(self.specs):
-            if not isinstance(spec.x, str) or spec.x != "_time":
-                continue
-
-            xref  = "x" if i == 0 else f"x{i + 1}"
-            yaxis = "y" if i == 0 else f"y{i + 1}"
-            # "y domain" / "y2 domain" pins coordinates to [0,1] within that
-            # subplot only — no bleed into adjacent subplots or gaps.
-            yref  = f"{yaxis} domain"
-
-            layout["shapes"].append({
-                "type": "line",
-                "xref": xref,
-                "yref": yref,
-                "x0": x_val,
-                "x1": x_val,
-                "y0": 0,
-                "y1": 1,
-                "line": {
-                    "color": self.event_line.color,
-                    "width": self.event_line.width,
-                    "dash": self.event_line.dash,
-                },
-            })
-            layout["annotations"].append({
-                "xref": xref,
-                "yref": yref,
-                "x": x_val,
-                "y": 0.5,
-                "text": label,
-                "showarrow": False,
-                "textangle": -90,
-                "font": {"size": self.event_line.font_size, "color": self.event_line.color},
-                "xanchor": "center",
-                "yanchor": "middle",
-                "bgcolor": self.event_line.bgcolor,
-                "bordercolor": self.event_line.bordercolor,
-                "borderwidth": self.event_line.borderwidth,
-                "borderpad": self.event_line.borderpad,
-            })
-
         self.on_data_changed()
 
     def finalize(self) -> None:

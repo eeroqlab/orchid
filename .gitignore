@@ -29,4 +29,5 @@ _autosummary/
 
 # exceptions
 !requirements.txt.venv/
+!CHANGES.txt
 .venv
