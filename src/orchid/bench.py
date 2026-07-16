@@ -691,15 +691,11 @@ class Bench:
         for name in names:
             if name in self.controllers:
                 p = self.controllers[name]
-                if isinstance(p, VirtualController):
-                    val = "—"
-                    kind = "virtual"
-                else:
-                    try:
-                        val = p.get()
-                    except Exception as e:
-                        val = f"ERR: {e}"
-                    kind = "ctrl"
+                try:
+                    val = p.get()
+                except Exception as e:
+                    val = f"ERR: {e}"
+                kind = "ctrl"
                 rows.append([name, kind, val, p.unit or "", p.limits or ""])
             elif name in self.readouts:
                 r = self.readouts[name]

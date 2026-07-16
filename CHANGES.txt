@@ -24,3 +24,5 @@ Run ponytail audit
 10. bench.py
     simplified the redundant conditional to units[0] if units else None
 11. Add CHANGES.txt
+12. Add readout_time to Procedure to properly estimate total measurement time
+13. Fixed Bench.snapshot for VirtualController - now it shows the values stored in self._last_value
