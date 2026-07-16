@@ -30,7 +30,7 @@ class InstrumentAdapter:
     """
 
     name: str
-    driver: Any
+    driver: Any = field(repr=False)
     backend: str = "custom"
     connection_info: dict = field(default_factory=dict)
 
@@ -96,6 +96,3 @@ class InstrumentAdapter:
                 await param.set(value)
                 return
         await asyncio.to_thread(self.set, attr, value)
-
-    def __repr__(self) -> str:
-        return f"InstrumentAdapter({self.name!r}, backend={self.backend!r})"

@@ -215,6 +215,8 @@ class Procedure:
         Names of readouts to record (must be registered in context).
     settle_time : float
         Seconds to wait after setting parameters before reading.
+    readout_time: float
+        Instrument query time after the readout command was sent (in seconds). Defined by user.
     snake : bool
         If True, reverse inner sweep direction on alternating outer iterations.
     write_mode : WriteMode
@@ -263,6 +265,7 @@ class Procedure:
     sweeps: list[Sweep] = field(default_factory=list)
     readouts: list[str] = field(default_factory=list)
     settle_time: float = 0.0
+    readout_time: float = 0.0
     snake: bool = False
     write_mode: WriteMode = WriteMode.POINTWISE
     error_policy: ErrorPolicy = ErrorPolicy.STOP_AND_SAVE
@@ -310,8 +313,8 @@ class Procedure:
                 params_info = [
                     {
                         "name": p.name,
-                        "min": float(np.min(vals)),
-                        "max": float(np.max(vals)),
+                        "min": float(vals[0]),
+                        "max": float(vals[-1]),
                         "unit": p.unit,
                     }
                     for p, vals in zip(s.controllers, s.all_values)
@@ -328,8 +331,8 @@ class Procedure:
                     "axis": i,
                     "type": "single",
                     "controller": s.controller.name,
-                    "min": float(np.min(s.values)),
-                    "max": float(np.max(s.values)),
+                    "min": float(s.values[0]),
+                    "max": float(s.values[-1]),
                     "n": s.length,
                     "unit": s.controller.unit,
                     "reverse": s.reverse,
@@ -369,12 +372,13 @@ class Procedure:
             "settings": {
                 "write_mode": str(self.write_mode),
                 "settle_time": self.settle_time,
+                "readout_time": self.readout_time,
                 "snake": self.snake,
                 "error_policy": str(self.error_policy),
                 "max_retries": self.max_retries,
             },
             "hooks": hooks,
-            "estimated_duration_s": round(total_points * self.settle_time, 2),
+            "estimated_duration_s": round(total_points * (self.settle_time + self.readout_time), 2),
         }
 
     def summary(self) -> None:

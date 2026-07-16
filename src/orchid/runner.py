@@ -19,7 +19,6 @@ from .procedure import ErrorPolicy, MonitorProcedure, MultiSweep, Procedure, Wri
 from zarro import (
     AxisSpecs,
     ControlVar,
-    DataKind as ZarroDataKind,
     ExperimentID,
     MeasurementSchema,
     ReadoutSpecs,
@@ -81,11 +80,6 @@ _WRITEMODE_TO_ZARR = {
 }
 
 
-def _to_zarro_kind(kind: DataKind) -> ZarroDataKind:
-    """Map orchid DataKind to zarro DataKind."""
-    return ZarroDataKind(kind.value)
-
-
 def _build_schema(proc: Procedure) -> MeasurementSchema:
     """Build a zarro MeasurementSchema from a Procedure."""
     control_axes = []
@@ -110,7 +104,7 @@ def _build_schema(proc: Procedure) -> MeasurementSchema:
         readout_specs.append(
             ReadoutSpecs(
                 name=rd.name,
-                kind=_to_zarro_kind(rd.kind),
+                kind=rd.kind,
                 shape=rd.shape,
                 unit=rd.unit,
                 contains=rd.contains,
@@ -619,7 +613,6 @@ class ExperimentRunner:
 
     def run(self, procedure: Procedure, plotter=None,
             print_summary: bool = False,
-            return_path: bool = False,
             save_plot: bool = True) -> Path | None:
         """Run a sweep experiment synchronously.
 
@@ -637,9 +630,6 @@ class ExperimentRunner:
         print_summary : bool
             If True, print the procedure summary table before running.
             Default is False.
-        return_path : bool
-            If True, return the Path to the saved data directory.
-            Default is False (returns None).
         save_plot : bool
             If True (default), call ``plotter.save()`` at the end of the run
             so the figure can be reloaded with ``DashPlotter.load()``.
@@ -648,7 +638,8 @@ class ExperimentRunner:
         Returns
         -------
         Path or None
-            Data directory path if ``return_path=True``, otherwise None.
+            Data directory path, or None if interrupted before any data
+            directory was created.
         """
         # Store references so the interrupt handler can do cleanup
         # even when asyncio.run() kills arun() before it can clean up.
@@ -663,7 +654,7 @@ class ExperimentRunner:
         except (KeyboardInterrupt, asyncio.CancelledError):
             result = self._handle_interrupt()
 
-        return result if return_path else None
+        return result
 
     def _handle_interrupt(self) -> Path | None:
         """Clean up after KeyboardInterrupt — save data, close progress bar."""
@@ -855,7 +846,6 @@ class ExperimentRunner:
     def run_monitor(self, procedure: MonitorProcedure, plotter=None,
                      background: bool = False,
                      print_summary: bool = False,
-                     return_path: bool = False,
                      save_plot: bool = True) -> Path | None:
         """Run time-series monitoring.
 
@@ -872,9 +862,6 @@ class ExperimentRunner:
         print_summary : bool
             If True, print the procedure summary table before running.
             Default is False.
-        return_path : bool
-            If True, return the Path to the saved data directory.
-            Default is False (returns None).
         save_plot : bool
             If True (default), call ``plotter.save()`` at the end of the run
             so the figure can be reloaded with ``DashPlotter.load()``.
@@ -883,9 +870,10 @@ class ExperimentRunner:
         Returns
         -------
         Path or None
-            Data directory path if ``return_path=True``, otherwise None.
-            In background mode, always returns None immediately; the path
-            is available via ``runner.stop_monitor()`` after stopping.
+            Data directory path, or None if interrupted before any data
+            directory was created. In background mode, always returns None
+            immediately; the path is available via ``runner.stop_monitor()``
+            after stopping.
         """
         if background:
             return self._run_monitor_background(procedure, plotter)
@@ -902,7 +890,7 @@ class ExperimentRunner:
         except (KeyboardInterrupt, asyncio.CancelledError):
             result = self._handle_interrupt()
 
-        return result if return_path else None
+        return result
 
     def _run_monitor_background(self, procedure, plotter) -> None:
         """Start monitor in a background thread."""

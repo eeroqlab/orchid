@@ -93,22 +93,30 @@ def _nice_marks(lo: float, hi: float) -> dict:
     return {v: {"label": _fmt(v)} for v in ticks}
 
 
+def _is_virtual(ctrl: Controller) -> bool:
+    """Return True for VirtualController instances."""
+    from .controller import VirtualController
+    return isinstance(ctrl, VirtualController)
+
+
 def _is_readable(ctrl: Controller) -> bool:
     """Return True if the controller can read back its current value.
 
-    A controller is *set-only* when it has no instrument binding **and** no
-    explicit ``get_func`` — i.e. a virtual binding that only writes.
+    VirtualControllers always qualify — their ``get()`` returns the cached
+    last-set value.  A PhysicalController is *set-only* when it has no
+    instrument binding **and** no explicit ``get_func``.
     """
+    if _is_virtual(ctrl):
+        return True
     if hasattr(ctrl, "instrument"):
         return not (ctrl.instrument is None and ctrl.get_func is None)
-    else:
-        return False
+    return False
 
 
-def _fmt_sp(v: float, unit: str = "", prec: int = 4) -> str:
+def _fmt_sp(v: float, unit: str = "") -> str:
     """Format a setpoint value: sign prefix + fixed decimals + optional unit."""
     sign = "−" if v < 0 else "+"
-    return f"{sign}{abs(v):.{prec}f}" + (f" {unit}" if unit else "")
+    return f"{sign}{abs(v):.4f}" + (f" {unit}" if unit else "")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -230,7 +238,6 @@ class ControlPanel:
         self._setter_thread: threading.Thread | None = None
         self._server_thread: threading.Thread | None = None
         self._wsgi_server = None
-        self._last_set: tuple[str, float, float] | None = None
         self._last_error: str | None = None  # set by setter thread on exception
 
     # ── Public API ────────────────────────────────────────────────────
@@ -275,7 +282,6 @@ class ControlPanel:
                 for name, val in items.items():
                     try:
                         self.bench[name] = val
-                        self._last_set = (name, val, time.time())
                         self._last_error = None
                     except Exception as exc:
                         self._last_error = f"{name}: {exc}"
@@ -360,6 +366,7 @@ class ControlPanel:
             unit = ctrl.unit or ""
             has_limits = ctrl.limits is not None
             readable = _is_readable(ctrl)
+            is_virtual = _is_virtual(ctrl)
             # show LCD if readback is on (readable) OR controller is set-only
             show_lcd = panel.readback or not readable
             lcd_role = "lcd" if readable else "lcd-sp"
@@ -395,48 +402,36 @@ class ControlPanel:
                     ],
                 ),
                 # ── LCD: readback (readable) or setpoint mirror (set-only) ──
-                *(
-                    [
-                        html.Div(
-                            className="lcd-frame",
-                            children=[
-                                html.Span(
-                                    id={"role": lcd_role, "ch": name},
-                                    className="lcd-value",
-                                    children=f"{val:.4g}",
-                                ),
-                                html.Span(unit, className="lcd-unit"),
-                            ],
-                        )
-                    ]
-                    if show_lcd
-                    else []
-                ),
-                # ── Setpoint row (readable) / no-readback badge (set-only) ──
-                html.Div(
-                    className="sp-row",
-                    children=[
-                        *(
-                            [
-                                html.Span("SP", className="sp-tag"),
-                                html.Span(
-                                    id={"role": "sp-text", "ch": name},
-                                    className="sp-text",
-                                    children=_fmt_sp(val, unit),
-                                ),
-                            ]
-                            if readable
-                            else [
-                                html.Span("NO RDBACK", className="no-rdback-badge"),
-                                # hidden sink keeps the callback output valid
-                                html.Span(
-                                    id={"role": "sp-text", "ch": name},
-                                    style={"display": "none"},
-                                ),
-                            ]
+                *([ html.Div(className="lcd-frame", children=[
+                    html.Span(
+                        id={"role": lcd_role, "ch": name},
+                        className="lcd-value",
+                        children=f"{val:.4g}",
+                    ),
+                    html.Span(unit, className="lcd-unit"),
+                ])] if show_lcd else []),
+
+                # ── Setpoint row (readable) / badge (virtual or set-only) ──
+                html.Div(className="sp-row", children=[
+                    *([
+                        html.Span("SP", className="sp-tag"),
+                        html.Span(
+                            id={"role": "sp-text", "ch": name},
+                            className="sp-text",
+                            children=_fmt_sp(val, unit),
                         ),
-                    ],
-                ),
+                    ] if readable and not is_virtual else [
+                        html.Span(
+                            "VIRTUAL" if is_virtual else "NO RDBACK",
+                            className="no-rdback-badge",
+                        ),
+                        # hidden sink keeps the callback output valid
+                        html.Span(
+                            id={"role": "sp-text", "ch": name},
+                            style={"display": "none"},
+                        ),
+                    ]),
+                ]),
             ]
 
             # ── Vertical slider ───────────────────────────────────────

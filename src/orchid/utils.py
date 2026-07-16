@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -127,7 +126,6 @@ def apply_theme(
 # 1. Define bold escape sequences
 BOLD = "\033[1m"
 RESET = "\033[0m"
-SPACES = "\x20\x20\x20\x20"
 
 
 def update_metadata(data_dir: str | Path, **kwargs) -> dict:
@@ -232,7 +230,7 @@ def _format_procedure_summary(d: dict) -> str:
     from the dict and rendered in a single tabulate call so all columns are
     globally aligned. Blank sentinel rows are post-processed into ─ separators.
     """
-    from tabulate import tabulate as _tabulate
+    from tabulate import tabulate
 
     kind = d.get("kind", "sweep")
     sweeps = d.get("sweeps", [])
@@ -323,7 +321,7 @@ def _format_procedure_summary(d: dict) -> str:
     # ── Render ────────────────────────────────────────────
     # tabulate receives plain text only — no ANSI codes — so column widths
     # are measured correctly. Bold and separators are applied in post-processing.
-    text = _tabulate(rows, tablefmt="plain")
+    text = tabulate(rows, tablefmt="plain")
     lines = text.splitlines()
     W = max((len(line) for line in lines if line.strip()), default=52)
     sep = "─" * W

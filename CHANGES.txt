@@ -1,0 +1,29 @@
+Changes made on 2026.07.13
+Run ponytail audit
+
+1. utils.py
+    deleted unused SPACES constant
+2. instrument.py
+    InstrumentAdapter.__repr__ replaced with field(repr=False)
+3. controller.py/runner.py
+    DataKind now re-exports zarro.DataKind directly;
+    deleted _to_zarro_kind() mapping
+4. gate_array.py
+    ramp/aramp share _ramp_prepare/_ramp_step/_ramp_finish;
+    show_presets/summary share a _print_table helper (dropped the dead tabulate-ImportError fallback)
+5. runner.py
+    removed the always-False return_path flag from run()/run_monitor()
+6. control_panel.py
+    removed unread _last_set; removed unused prec param from _fmt_sp
+7. plotting/_base.py+_spec.py
+    deleted EventLineConfig and the dead vline-rendering body of PlotterBase.notify_event (confirmed unreachable — DashPlotter fully overrides it); also updated _dash.py/_browse.py save/load to drop the field (with backward-compat handling for old saved files) and cleaned up docs/orchid.md
+8. plotting/__init__.py
+    dropped re-export of private _lp_* helpers
+9. _dash.py/_browse.py
+    extracted shared build_theme_picker() into _themes.py
+10. bench.py
+    simplified the redundant conditional to units[0] if units else None
+11. Add CHANGES.txt
+12. Add readout_time to Procedure to properly estimate total measurement time
+13. Fixed Bench.snapshot for VirtualController - now it shows the values stored in self._last_value
+14. Fix Procedure.summary() rendering correct order of controller's first and last values

@@ -98,7 +98,7 @@ def _reconstruct_frozen_plotter(data_dir: str | Path):
     the raw Plotly figure dict from ``figure.json.gz``.
     """
     import gzip, json, yaml
-    from ._spec import EventLineConfig, PlotSpec, PostResult
+    from ._spec import PlotSpec, PostResult
     from ._dash import DashPlotter
 
     data_dir = Path(data_dir)
@@ -112,8 +112,7 @@ def _reconstruct_frozen_plotter(data_dir: str | Path):
 
     pa = dict(config["plotter"])
     pa["open_browser"] = False          # no browser, no server
-    if "event_line" in pa and pa["event_line"] is not None:
-        pa["event_line"] = EventLineConfig(**pa["event_line"])
+    pa.pop("event_line", None)  # dropped field — ignore if present in older saves
 
     specs   = [PlotSpec.from_dict(s) for s in config["specs"]]
     plotter = DashPlotter(plots=specs, **pa)
@@ -148,41 +147,10 @@ def _reconstruct_frozen_plotter(data_dir: str | Path):
 
 def _br_header(theme_name: str) -> object:
     """Top bar — reuses .lp-header CSS."""
-    from ._themes import THEMES
+    from ._themes import build_theme_picker
     from dash import dcc, html
 
-    options = []
-    for key, td in THEMES.items():
-        traces = td.get("traces", ["#888"])
-        swatches = [
-            html.Span(style={
-                "backgroundColor": traces[i] if i < len(traces) else "#ccc",
-                "display": "inline-block",
-                "width": "14px", "height": "28px",
-            })
-            for i in range(3)
-        ]
-        label = html.Div([
-            html.Span(swatches, style={
-                "display": "inline-flex",
-                "border": "1px solid rgba(128,128,128,0.2)",
-            }),
-            html.Div([
-                html.Div(td["name"], className="lp-theme-name"),
-                html.Div(td.get("sub", ""), className="lp-theme-sub"),
-            ]),
-        ], className="lp-theme-option")
-        options.append({"label": label, "value": key})
-
-    cur_td     = THEMES.get(theme_name, THEMES["orchid"])
-    cur_traces = cur_td.get("traces", ["#888"])
-    summary_swatches = [
-        html.Span(style={
-            "backgroundColor": cur_traces[i] if i < len(cur_traces) else "#ccc",
-            "display": "inline-block", "width": "8px", "height": "12px",
-        })
-        for i in range(3)
-    ]
+    options, summary_swatches = build_theme_picker(theme_name)
 
     return html.Div(className="lp-header", children=[
         html.Div(className="lp-brand", children=[

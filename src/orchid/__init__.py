@@ -9,7 +9,7 @@ from .bench import Bench
 from .gate_array import GateArray
 from .procedure import ErrorPolicy, MonitorProcedure, MultiSweep, Procedure, Sweep, WriteMode
 from .runner import ExperimentRunner
-from .plotting import EventLineConfig, LivePlotter, DashPlotter, BrowseApp, PlotterBase, PlotSpec, PostResult
+from .plotting import LivePlotter, DashPlotter, BrowseApp, PlotterBase, PlotSpec, PostResult
 from .control_panel import ControlPanel
 from .utils import apply_theme, read_events, read_limit_log, read_metadata, read_procedure, update_metadata, PALETTE
 
@@ -34,7 +34,6 @@ __all__ = [
     "Sweep",
     "WriteMode",
     "ExperimentRunner",
-    "EventLineConfig",
     "PlotterBase",
     "DashPlotter",
     "BrowseApp",

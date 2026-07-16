@@ -25,6 +25,12 @@ if TYPE_CHECKING:
     from .procedure import MultiSweep
 
 
+def _print_table(rows: list[list[str]], headers: list[str]) -> None:
+    """Print a simple table via tabulate."""
+    from tabulate import tabulate as _tabulate
+    print(_tabulate(rows, headers=headers, tablefmt="simple"))
+
+
 class GateArray:
     """A named group of bench controllers with compound operations and presets.
 
@@ -130,6 +136,32 @@ class GateArray:
 
     # ── Ramp ──────────────────────────────────────────────────────────────────
 
+    def _ramp_prepare(
+        self, targets: dict[str, float], start: dict[str, float] | None
+    ) -> dict[str, float]:
+        """Validate targets/limits and resolve per-channel starting values."""
+        self._validate_names(targets)
+        self._check_limits(targets)
+        starts = dict(start) if start is not None else {}
+        for k in targets:
+            if k not in starts:
+                starts[k] = self._bench[k]
+        return starts
+
+    def _ramp_step(
+        self, targets: dict[str, float], starts: dict[str, float], i: int, steps: int
+    ) -> None:
+        """Set every channel to its interpolated value at step ``i``."""
+        frac = i / steps
+        for k in targets:
+            self._bench[k] = starts[k] + (targets[k] - starts[k]) * frac
+
+    def _ramp_finish(self, targets: dict[str, float], log_events: bool) -> None:
+        """Emit one summary bench event per ramped channel, if requested."""
+        if log_events:
+            for k, v in targets.items():
+                self._bench._fire_event(k, v)
+
     def ramp(
         self,
         targets: dict[str, float],
@@ -165,21 +197,12 @@ class GateArray:
             via ``bench[name]`` — which for virtual controllers returns the
             cached last-set value.
         """
-        self._validate_names(targets)
-        self._check_limits(targets)
-        starts = dict(start) if start is not None else {}
-        for k in targets:
-            if k not in starts:
-                starts[k] = self._bench[k]
+        starts = self._ramp_prepare(targets, start)
         with self._bench.suppress_events():
             for i in range(1, steps + 1):
-                frac = i / steps
-                for k in targets:
-                    self._bench[k] = starts[k] + (targets[k] - starts[k]) * frac
+                self._ramp_step(targets, starts, i, steps)
                 time.sleep(dt)
-        if log_events:
-            for k, v in targets.items():
-                self._bench._fire_event(k, v)
+        self._ramp_finish(targets, log_events)
 
     async def aramp(
         self,
@@ -208,21 +231,12 @@ class GateArray:
         start : dict[str, float] or None
             Explicit starting values.  ``None`` reads via ``bench[name]``.
         """
-        self._validate_names(targets)
-        self._check_limits(targets)
-        starts = dict(start) if start is not None else {}
-        for k in targets:
-            if k not in starts:
-                starts[k] = self._bench[k]
+        starts = self._ramp_prepare(targets, start)
         with self._bench.suppress_events():
             for i in range(1, steps + 1):
-                frac = i / steps
-                for k in targets:
-                    self._bench[k] = starts[k] + (targets[k] - starts[k]) * frac
+                self._ramp_step(targets, starts, i, steps)
                 await asyncio.sleep(dt)
-        if log_events:
-            for k, v in targets.items():
-                self._bench._fire_event(k, v)
+        self._ramp_finish(targets, log_events)
 
     # ── Configs ───────────────────────────────────────────────────────────────
 
@@ -359,12 +373,6 @@ class GateArray:
             B2            -0.12       -0.15           0          —
             ST            -0.1        —               —          —
         """
-        try:
-            from tabulate import tabulate as _tabulate
-            use_tabulate = True
-        except ImportError:
-            use_tabulate = False
-
         if not self._presets:
             print(f"GateArray '{self.name}': no presets stored.")
             return
@@ -391,16 +399,7 @@ class GateArray:
 
         print(f"GateArray '{self.name}'  "
               f"({len(self._channels)} channels, {len(self._presets)} presets)")
-        if use_tabulate:
-            print(_tabulate(rows, headers=headers, tablefmt="simple"))
-        else:
-            col_w = [max(len(h), max((len(r[i]) for r in rows), default=0))
-                     for i, h in enumerate(headers)]
-            fmt = "  ".join(f"{{:<{w}}}" for w in col_w)
-            print(fmt.format(*headers))
-            print("  ".join("-" * w for w in col_w))
-            for row in rows:
-                print(fmt.format(*row))
+        _print_table(rows, headers)
 
     def delete_preset(self, name: str) -> None:
         """Delete a named preset.
@@ -467,12 +466,6 @@ class GateArray:
 
     def summary(self) -> None:
         """Print a table of channel names, current values, units, and limits."""
-        try:
-            from tabulate import tabulate as _tabulate
-            use_tabulate = True
-        except ImportError:
-            use_tabulate = False
-
         rows = []
         for ch in self._channels:
             ctrl = self._bench.controllers[ch]
@@ -490,13 +483,7 @@ class GateArray:
 
         print(f"GateArray '{self.name}'  ({len(self._channels)} channels,"
               f" {len(self._presets)} presets)")
-        if use_tabulate:
-            print(_tabulate(rows, headers=["Channel", "Value", "Unit", "Limits"],
-                            tablefmt="simple"))
-        else:
-            print(f"{'Channel':<16} {'Value':>12}  {'Unit':<8} Limits")
-            for ch, val, unit, lim in rows:
-                print(f"{ch:<16} {val:>12}  {unit:<8} {lim}")
+        _print_table(rows, ["Channel", "Value", "Unit", "Limits"])
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
