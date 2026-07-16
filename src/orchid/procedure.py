@@ -313,8 +313,8 @@ class Procedure:
                 params_info = [
                     {
                         "name": p.name,
-                        "min": float(np.min(vals)),
-                        "max": float(np.max(vals)),
+                        "min": float(vals[0]),
+                        "max": float(vals[-1]),
                         "unit": p.unit,
                     }
                     for p, vals in zip(s.controllers, s.all_values)
@@ -331,8 +331,8 @@ class Procedure:
                     "axis": i,
                     "type": "single",
                     "controller": s.controller.name,
-                    "min": float(np.min(s.values)),
-                    "max": float(np.max(s.values)),
+                    "min": float(s.values[0]),
+                    "max": float(s.values[-1]),
                     "n": s.length,
                     "unit": s.controller.unit,
                     "reverse": s.reverse,

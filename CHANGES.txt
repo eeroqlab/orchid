@@ -26,3 +26,4 @@ Run ponytail audit
 11. Add CHANGES.txt
 12. Add readout_time to Procedure to properly estimate total measurement time
 13. Fixed Bench.snapshot for VirtualController - now it shows the values stored in self._last_value
+14. Fix Procedure.summary() rendering correct order of controller's first and last values
