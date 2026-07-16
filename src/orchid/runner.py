@@ -654,7 +654,7 @@ class ExperimentRunner:
         # even when asyncio.run() kills arun() before it can clean up.
         self._run_state = {
             "writer": None, "pbar": None, "data_dir": None,
-            "proc": procedure, "plotter": plotter,
+            "proc": procedure, "plotter": plotter, "instrument_settings": {},
         }
         try:
             result = _run_coro(self.arun(procedure, plotter=plotter,
@@ -671,7 +671,7 @@ class ExperimentRunner:
         if s["pbar"]:
             s["pbar"].close()
         if s["writer"] and s["data_dir"]:
-            meta = {**s["proc"].bench.metadata, **s["proc"].metadata, "status": "interrupted"}
+            meta = self._build_meta(s["proc"], "interrupted", s.get("instrument_settings"))
             try:
                 s["writer"].overwrite = True
                 s["writer"].write_metadata(meta=meta)
@@ -714,6 +714,41 @@ class ExperimentRunner:
             (data_dir / "limit_log.yaml").write_text(
                 yaml.safe_dump(entries, sort_keys=False, allow_unicode=True)
             )
+
+    @staticmethod
+    def _collect_instrument_settings(proc) -> dict:
+        """Snapshot every bench instrument that exposes settings.
+
+        Returns ``{instrument_name: settings_dict}`` for each instrument whose
+        adapter :py:meth:`~orchid.instrument.InstrumentAdapter.get_settings`
+        returns a dict.  Instruments that expose no settings are omitted.  A
+        driver that raises is recorded as ``{"error": "..."}`` rather than
+        aborting the run.
+        """
+        settings: dict = {}
+        for name, adapter in proc.bench.instruments.items():
+            try:
+                snap = adapter.get_settings()
+            except Exception as e:
+                settings[name] = {"error": repr(e)}
+                continue
+            if snap is not None:
+                settings[name] = snap
+        return settings
+
+    @staticmethod
+    def _build_meta(proc, status: str, instrument_settings: dict | None = None) -> dict:
+        """Assemble the metadata dict written at the end of a run.
+
+        Merges user metadata (``bench.metadata`` then ``proc.metadata``), then
+        folds in per-instrument settings under an ``"instrument_settings"`` key,
+        then stamps ``status``.
+        """
+        meta = {**proc.bench.metadata, **proc.metadata}
+        if instrument_settings:
+            meta["instrument_settings"] = instrument_settings
+        meta["status"] = status
+        return meta
 
     @staticmethod
     def _validate_virtual_readouts(proc) -> None:
@@ -791,6 +826,12 @@ class ExperimentRunner:
 
         await _acall_hook(proc.before_experiment)
 
+        # Snapshot instrument state at the start of the run (skipped on dry
+        # runs, which write no metadata and shouldn't hit instruments).
+        instrument_settings = {} if no_save else self._collect_instrument_settings(proc)
+        if hasattr(self, "_run_state"):
+            self._run_state["instrument_settings"] = instrument_settings
+
         strategy_cls = _STRATEGY_MAP.get(proc.write_mode, PointwiseStrategy)
         strategy = strategy_cls(proc, writer, pbar, plotter,
                                 stop_event=self._sweep_stop)
@@ -805,7 +846,7 @@ class ExperimentRunner:
             raise
         except Exception:
             if not no_save:
-                meta = {**proc.bench.metadata, **proc.metadata, "status": "error"}
+                meta = self._build_meta(proc, "error", instrument_settings)
                 writer.overwrite = True
                 writer.write_metadata(meta=meta)
             if pbar:
@@ -817,7 +858,7 @@ class ExperimentRunner:
 
         status = "stopped" if stopped_early else "completed"
         if not no_save:
-            meta = {**proc.bench.metadata, **proc.metadata, "status": status}
+            meta = self._build_meta(proc, status, instrument_settings)
             writer.overwrite = True
             writer.write_metadata(meta=meta)
 
@@ -893,7 +934,7 @@ class ExperimentRunner:
         self._monitor_stop.clear()
         self._run_state = {
             "writer": None, "pbar": None, "data_dir": None,
-            "proc": procedure, "plotter": plotter,
+            "proc": procedure, "plotter": plotter, "instrument_settings": {},
         }
         try:
             result = _run_coro(self.arun_monitor(procedure, plotter=plotter,
@@ -1001,6 +1042,11 @@ class ExperimentRunner:
 
         await _acall_hook(proc.before_experiment)
 
+        # Snapshot instrument state at the start of the monitor run.
+        instrument_settings = self._collect_instrument_settings(proc)
+        if hasattr(self, "_run_state"):
+            self._run_state["instrument_settings"] = instrument_settings
+
         start_time = time.time()
         sample_idx = 0
 
@@ -1086,7 +1132,7 @@ class ExperimentRunner:
             event_log = proc.bench._stop_event_log()
 
         status = "interrupted" if interrupted else "completed"
-        meta = {**proc.bench.metadata, **proc.metadata, "status": status}
+        meta = self._build_meta(proc, status, instrument_settings)
         writer.close(meta=meta)
 
         # Write events.yaml if any parameter changes were recorded

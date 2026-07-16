@@ -97,5 +97,30 @@ class InstrumentAdapter:
                 return
         await asyncio.to_thread(self.set, attr, value)
 
+    def get_settings(self) -> dict | None:
+        """Return a settings/state snapshot for this instrument, or ``None``.
+
+        Resolution order:
+
+        1. If the driver defines a callable ``get_settings()`` (the same name
+           used by ``zpc.get_settings``), call it and return its dict.
+        2. Otherwise, for ``qcodes`` drivers, fall back to the driver's own
+           qcodes-native ``snapshot()``.  This is the *driver's* method — it is
+           unrelated to :py:meth:`Bench.snapshot`, which just prints controller
+           values.
+        3. Otherwise return ``None`` — the instrument contributes nothing.
+
+        May raise if the driver's own method raises; the runner catches per
+        instrument so one bad driver can't abort an experiment.
+        """
+        driver_get_settings = getattr(self.driver, "get_settings", None)
+        if callable(driver_get_settings):
+            return driver_get_settings()
+        if self.backend == "qcodes":
+            snap = getattr(self.driver, "snapshot", None)
+            if callable(snap):
+                return snap()
+        return None
+
     def __repr__(self) -> str:
         return f"InstrumentAdapter({self.name!r}, backend={self.backend!r})"
