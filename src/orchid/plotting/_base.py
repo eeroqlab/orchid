@@ -628,6 +628,10 @@ class PlotterBase(abc.ABC):
         if spec.z not in data or len(index) == 0:
             return
         z_val = data[spec.z]
+        # bug fix if instrument outputs list | tuple instead of np.array
+        if isinstance(z_val, (list, tuple)):
+            z_val = np.asarray(z_val)
+
         row_idx = index[0]
 
         def _resolve_zcol() -> int:
