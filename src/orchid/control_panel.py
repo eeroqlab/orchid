@@ -218,6 +218,7 @@ class ControlPanel:
         self,
         bench: Bench,
         read_only: bool = False,
+        host: str = "127.0.0.1",
         port: int = 8051,
         controllers: list[str] | None = None,
         open_browser: bool = False,
@@ -227,6 +228,7 @@ class ControlPanel:
     ) -> None:
         self.bench = bench
         self.read_only = read_only
+        self.host = host
         self.port = port
         self._ctrl_names: list[str] = controllers or list(bench.controllers.keys())
         self.open_browser = open_browser
@@ -1058,7 +1060,7 @@ class ControlPanel:
 
         from werkzeug.serving import make_server
 
-        srv = make_server("127.0.0.1", self.port, app.server)
+        srv = make_server(self.host, self.port, app.server,threaded=True)
         self._wsgi_server = srv
         self._server_thread = threading.Thread(target=srv.serve_forever, daemon=True)
         self._server_thread.start()
@@ -1068,6 +1070,6 @@ class ControlPanel:
         if self.open_browser:
             import webbrowser
 
-            webbrowser.open(f"http://localhost:{self.port}")
+            webbrowser.open(f"http://{self.host}:{self.port}")
 
-        print(f"Control panel started at http://localhost:{self.port}")
+        print(f"Control panel started at http://{self.host}:{self.port}")

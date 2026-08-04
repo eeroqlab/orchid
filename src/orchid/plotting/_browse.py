@@ -271,8 +271,9 @@ class BrowseApp:
     Do not instantiate directly — use ``DashPlotter.browse(root_dir)``.
     """
 
-    def __init__(self, root_dir: Path, port: int, theme: str = "orchid"):
+    def __init__(self, root_dir: Path,host:str = "127.0.0.1", port: int=8053, theme: str = "orchid"):
         self.root_dir = Path(root_dir).expanduser().resolve()
+        self.host = host
         self.port     = port
         self._current_theme   = theme
         self._current_plotter = None   # frozen plotter for the selected experiment
@@ -682,7 +683,7 @@ class BrowseApp:
         if prev is not None and prev is not self:
             prev.stop(_silent=True)
 
-        srv = make_server("127.0.0.1", self.port, app.server)
+        srv = make_server(self.host, self.port, app.server)
         self._wsgi_server = srv
         _browse_registry[self.port] = self
 
@@ -693,7 +694,7 @@ class BrowseApp:
         time.sleep(0.5)
 
         import webbrowser
-        webbrowser.open(f"http://localhost:{self.port}")
+        webbrowser.open(f"http://{self.host}:{self.port}")
         n_found = len(_scan_experiments(self.root_dir))
-        print(f"Orchid experiment browser at http://localhost:{self.port}")
+        print(f"Orchid experiment browser at http://{self.host}:{self.port}")
         # print(f"  Scanning: {self.root_dir}  ({n_found} experiment(s) found)")
