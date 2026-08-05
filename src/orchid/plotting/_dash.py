@@ -470,6 +470,7 @@ class DashPlotter(PlotterBase):
     def __init__(
         self,
         plots: list[PlotSpec],
+        host: str = "127.0.0.1",
         port: int = 8050,
         height: int = 350,
         width: int = 700,
@@ -488,6 +489,7 @@ class DashPlotter(PlotterBase):
             max_display_pts=max_display_pts,
         )
         self.port = port
+        self.host = host
         self.update_interval = update_interval
         self.rail_readouts: list[str] = list(rail_readouts) if rail_readouts else []
         self.instrument_info: dict[str, str] = dict(instrument_info) if instrument_info else {}
@@ -1501,7 +1503,7 @@ class DashPlotter(PlotterBase):
             prev.stop(_silent=True)
 
         # Bind socket on the calling thread so port errors surface immediately
-        srv = make_server("127.0.0.1", self.port, app.server)
+        srv = make_server(self.host, self.port, app.server)
         self._wsgi_server = srv
         _port_registry[self.port] = self
 
@@ -1512,9 +1514,9 @@ class DashPlotter(PlotterBase):
 
         if self.open_browser:
             import webbrowser
-            webbrowser.open(f"http://localhost:{self.port}")
+            webbrowser.open(f"http://{self.host}:{self.port}")
 
-        print(f"Live plot server started at http://localhost:{self.port}")
+        print(f"Live plot server started at http://{self.host}:{self.port}")
 
     def stop(self, _silent: bool = False) -> None:
         """Stop the Dash server and free the port.
