@@ -683,7 +683,7 @@ class BrowseApp:
         if prev is not None and prev is not self:
             prev.stop(_silent=True)
 
-        srv = make_server(self.host, self.port, app.server)
+        srv = make_server(self.host, self.port, app.server, threaded=True)
         self._wsgi_server = srv
         _browse_registry[self.port] = self
 
@@ -693,8 +693,11 @@ class BrowseApp:
         self._server_thread.start()
         time.sleep(0.5)
 
+        # 0.0.0.0 is a bind-all address, not a browsable one — point the
+        # browser / printed URL at localhost so the link actually resolves.
+        browse_host = "localhost" if self.host in ("0.0.0.0", "") else self.host
         import webbrowser
-        webbrowser.open(f"http://{self.host}:{self.port}")
+        webbrowser.open(f"http://{browse_host}:{self.port}")
         n_found = len(_scan_experiments(self.root_dir))
-        print(f"Orchid experiment browser at http://{self.host}:{self.port}")
+        print(f"Orchid experiment browser at http://{browse_host}:{self.port}")
         # print(f"  Scanning: {self.root_dir}  ({n_found} experiment(s) found)")

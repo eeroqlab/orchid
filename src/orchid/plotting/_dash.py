@@ -430,6 +430,10 @@ class DashPlotter(PlotterBase):
     ----------
     plots : list of PlotSpec
         Subplot specifications.
+    host : str
+        Interface the server binds to. Default ``"127.0.0.1"`` (localhost
+        only). Set to ``"0.0.0.0"`` to accept connections from other
+        machines on the network.
     port : int
         Port for the Dash server. Default 8050.
     height : int
@@ -1027,6 +1031,7 @@ class DashPlotter(PlotterBase):
             },
             "specs": [s.to_dict() for s in self.specs],
             "plotter": {
+                "host":            self.host,
                 "port":            self.port,
                 "update_interval": self.update_interval,
                 "theme":           self._current_theme,
@@ -1063,7 +1068,8 @@ class DashPlotter(PlotterBase):
                 fh.write(payload)
 
     @classmethod
-    def load(cls, data_dir, *, port: int | None = 8052) -> "DashPlotter":
+    def load(cls, data_dir, *, host: str | None = None,
+             port: int | None = 8052) -> "DashPlotter":
         """Load a saved plotter configuration and open the browser.
 
         Reads ``plotter_config.yaml`` and ``figure.json.gz`` from *data_dir*
@@ -1074,6 +1080,10 @@ class DashPlotter(PlotterBase):
         ----------
         data_dir : str or Path
             Directory containing ``plotter_config.yaml`` and ``figure.json.gz``.
+        host : str, optional
+            Override the host saved in the config.  Pass ``"0.0.0.0"`` to serve
+            the reloaded figure to other machines on the network.  When ``None``
+            (default) the saved host is used, falling back to ``"127.0.0.1"``.
         port : int, optional
             Override the port saved in the config.  Useful when the original
             port is already occupied by a running experiment::
@@ -1097,6 +1107,8 @@ class DashPlotter(PlotterBase):
 
         # Reconstruct plotter from saved args
         pa = dict(config["plotter"])
+        if host is not None:
+            pa["host"] = host
         if port is not None:
             pa["port"] = port
         pa.pop("event_line", None)  # dropped field — ignore if present in older saves
@@ -1131,7 +1143,8 @@ class DashPlotter(PlotterBase):
         return plotter
 
     @classmethod
-    def browse(cls, root_dir, *, port: int = 8053, theme: str = "orchid") -> "BrowseApp":
+    def browse(cls, root_dir, *, host: str = "127.0.0.1", port: int = 8053,
+               theme: str = "orchid") -> "BrowseApp":
         """Open a browser-based experiment gallery for all runs under *root_dir*.
 
         Scans *root_dir* recursively for directories containing
@@ -1143,6 +1156,10 @@ class DashPlotter(PlotterBase):
         ----------
         root_dir : str or Path
             Root directory to scan for saved experiment directories.
+        host : str
+            Interface the server binds to. Default ``"127.0.0.1"`` (localhost
+            only). Set to ``"0.0.0.0"`` to accept connections from other
+            machines on the network.
         port : int
             Port for the browse server.  Default 8053.
         theme : str
@@ -1159,7 +1176,7 @@ class DashPlotter(PlotterBase):
             browser.stop()
         """
         from ._browse import BrowseApp   # deferred — avoids import-time coupling
-        app = BrowseApp(root_dir=Path(root_dir), port=port, theme=theme)
+        app = BrowseApp(root_dir=Path(root_dir), host=host, port=port, theme=theme)
         app._start_server()
         return app
 
@@ -1502,8 +1519,11 @@ class DashPlotter(PlotterBase):
         if prev is not None and prev is not self:
             prev.stop(_silent=True)
 
-        # Bind socket on the calling thread so port errors surface immediately
-        srv = make_server(self.host, self.port, app.server)
+        # Bind socket on the calling thread so port errors surface immediately.
+        # threaded=True gives one worker thread per request so a slow poll (or a
+        # large figure serialization) can't block the next one — the UI stays
+        # responsive while the monitor thread is busy acquiring/fitting.
+        srv = make_server(self.host, self.port, app.server, threaded=True)
         self._wsgi_server = srv
         _port_registry[self.port] = self
 
@@ -1512,11 +1532,15 @@ class DashPlotter(PlotterBase):
 
         time.sleep(0.5)
 
+        # 0.0.0.0 is a bind-all address, not a browsable one — point the
+        # browser / printed URL at localhost so the link actually resolves.
+        browse_host = "localhost" if self.host in ("0.0.0.0", "") else self.host
+
         if self.open_browser:
             import webbrowser
-            webbrowser.open(f"http://{self.host}:{self.port}")
+            webbrowser.open(f"http://{browse_host}:{self.port}")
 
-        print(f"Live plot server started at http://{self.host}:{self.port}")
+        print(f"Live plot server started at http://{browse_host}:{self.port}")
 
     def stop(self, _silent: bool = False) -> None:
         """Stop the Dash server and free the port.
