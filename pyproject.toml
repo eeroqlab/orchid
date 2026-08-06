@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "orchid"
-version = "0.1.0"
+version = "0.1.1"
 description = "Orchestrating Instruments & Data — a lab experiment control system"
 requires-python = ">=3.12"
 license = {text = "MIT"}

@@ -430,6 +430,10 @@ class DashPlotter(PlotterBase):
     ----------
     plots : list of PlotSpec
         Subplot specifications.
+    host : str
+        Interface the server binds to. Default ``"127.0.0.1"`` (localhost
+        only). Set to ``"0.0.0.0"`` to accept connections from other
+        machines on the network.
     port : int
         Port for the Dash server. Default 8050.
     height : int
@@ -1027,6 +1031,7 @@ class DashPlotter(PlotterBase):
             },
             "specs": [s.to_dict() for s in self.specs],
             "plotter": {
+                "host":            self.host,
                 "port":            self.port,
                 "update_interval": self.update_interval,
                 "theme":           self._current_theme,
@@ -1502,8 +1507,11 @@ class DashPlotter(PlotterBase):
         if prev is not None and prev is not self:
             prev.stop(_silent=True)
 
-        # Bind socket on the calling thread so port errors surface immediately
-        srv = make_server(self.host, self.port, app.server)
+        # Bind socket on the calling thread so port errors surface immediately.
+        # threaded=True gives one worker thread per request so a slow poll (or a
+        # large figure serialization) can't block the next one — the UI stays
+        # responsive while the monitor thread is busy acquiring/fitting.
+        srv = make_server(self.host, self.port, app.server, threaded=True)
         self._wsgi_server = srv
         _port_registry[self.port] = self
 
@@ -1512,11 +1520,15 @@ class DashPlotter(PlotterBase):
 
         time.sleep(0.5)
 
+        # 0.0.0.0 is a bind-all address, not a browsable one — point the
+        # browser / printed URL at localhost so the link actually resolves.
+        browse_host = "localhost" if self.host in ("0.0.0.0", "") else self.host
+
         if self.open_browser:
             import webbrowser
-            webbrowser.open(f"http://{self.host}:{self.port}")
+            webbrowser.open(f"http://{browse_host}:{self.port}")
 
-        print(f"Live plot server started at http://{self.host}:{self.port}")
+        print(f"Live plot server started at http://{browse_host}:{self.port}")
 
     def stop(self, _silent: bool = False) -> None:
         """Stop the Dash server and free the port.

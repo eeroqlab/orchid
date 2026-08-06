@@ -683,7 +683,7 @@ class BrowseApp:
         if prev is not None and prev is not self:
             prev.stop(_silent=True)
 
-        srv = make_server(self.host, self.port, app.server)
+        srv = make_server(self.host, self.port, app.server, threaded=True)
         self._wsgi_server = srv
         _browse_registry[self.port] = self
 
