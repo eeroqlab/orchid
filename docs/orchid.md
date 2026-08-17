@@ -3297,10 +3297,10 @@ Executes procedures and manages data flow to zarro. Internally delegates sweep e
 
 | Method / Property                       | Description                              |
 |-----------------------------------------|------------------------------------------|
-| `run(procedure, plotter=None, print_summary=False, return_path=False, save_plot=True) -> Path or None` | Run sweep experiment (sync) |
+| `run(procedure, plotter=None, print_summary=False, save_plot=True) -> Path or None` | Run sweep experiment (sync) |
 | `await arun(procedure, plotter=None, print_summary=False, save_plot=True) -> Path` | Run sweep experiment (async) |
 | `stop()`                                | Stop a running sweep after the current point — data saved, plot frozen |
-| `run_monitor(procedure, plotter=None, background=False, print_summary=False, return_path=False, save_plot=True) -> Path or None` | Run time-series monitor |
+| `run_monitor(procedure, plotter=None, background=False, print_summary=False, save_plot=True) -> Path or None` | Run time-series monitor |
 | `await arun_monitor(procedure, plotter=None, print_summary=False, save_plot=True) -> Path` | Run monitor (async) |
 | `stop_monitor() -> Path`                | Stop a background monitor and return data path |
 | `is_monitoring` *(property)*            | `True` if a background monitor is currently running |
@@ -3314,7 +3314,6 @@ All methods return the `Path` to the output data directory.
 | `procedure`     | `Procedure`             | required| The sweep procedure                           |
 | `plotter`       | `PlotterBase` or `None` | `None`  | Live plotter (any `PlotterBase` subclass)     |
 | `print_summary` | `bool`                  | `False` | If `True`, print the procedure summary table before running. |
-| `return_path`   | `bool`                  | `False` | If `True`, return the `Path` to the saved data directory (`run()` only). |
 | `save_plot`     | `bool`                  | `True`  | If `True`, call `plotter.save()` at experiment end so the figure can be reloaded with `DashPlotter.load()`. Set to `False` to skip (e.g. quick tests). |
 
 **`run_monitor` parameters:**
@@ -3325,7 +3324,6 @@ All methods return the `Path` to the output data directory.
 | `plotter`       | `LivePlotter` or `None` | `None`  | Live plotter                                   |
 | `background`    | `bool`                  | `False` | If `True`, run in background thread and return immediately. Use `bench["Vgt"] = 0.5` to change parameters, `runner.stop_monitor()` to stop. |
 | `print_summary` | `bool`                  | `False` | If `True`, print the procedure summary table before running. |
-| `return_path`   | `bool`                  | `False` | If `True`, return the `Path` to the saved data directory. In background mode, always returns `None`; use `stop_monitor()` to get the path. |
 | `save_plot`     | `bool`                  | `True`  | If `True`, call `plotter.save()` at experiment end. Set to `False` to skip. |
 
 **Stopping experiments:**
